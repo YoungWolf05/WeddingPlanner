@@ -1,0 +1,28 @@
+{
+  "name": "wedding-planner-chatbot",
+  "version": "0.1.0",
+  "description": "A wedding planner chatbot built with LangChain + TypeScript, powered by a corporate LiteLLM endpoint.",
+  "type": "module",
+  "scripts": {
+    "test:connection": "tsx src/test-connection.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "langchain",
+    "chatbot",
+    "wedding-planner",
+    "litellm"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@langchain/core": "^1.2.1",
+    "@langchain/openai": "^1.5.3",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
