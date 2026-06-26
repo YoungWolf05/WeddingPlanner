@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test:connection": "tsx src/test-connection.ts",
+    "chain": "tsx src/run-chain.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
