@@ -1,12 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { config } from "./config.js";
 
-/**
- * Basic connectivity test.
- *
- * Verifies that LangChain can reach the corporate LiteLLM endpoint and get a
- * response back from the configured model. Run with: npm run test:connection
- */
+// Connectivity test: verifies LangChain can reach LiteLLM. Run: npm run test:connection
 async function main() {
   console.log("Wedding Planner Chatbot - LiteLLM connectivity test");
   console.log("----------------------------------------------------");
@@ -15,8 +10,6 @@ async function main() {
   console.log(`API key  : ${config.apiKey.slice(0, 4)}...(hidden)`);
   console.log("");
 
-  // ChatOpenAI talks to any OpenAI-compatible API (LiteLLM is one).
-  // We point its client at the corporate base URL.
   const llm = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,

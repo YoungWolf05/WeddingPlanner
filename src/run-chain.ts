@@ -1,14 +1,6 @@
 import { createWeddingPlannerChain } from "./core/chain.js";
 
-/**
- * Sanity-check script for the Phase 1 LCEL chain.
- *
- * Usage:
- *   npm run chain "ideas for a beach wedding"
- *
- * Invokes the wedding planner chain once with the message passed on the
- * command line and prints the model's reply.
- */
+// Phase 1 sanity check: npm run chain "ideas for a beach wedding"
 async function main() {
   const input = process.argv.slice(2).join(" ").trim();
 

@@ -2,15 +2,7 @@ import { HumanMessage } from "@langchain/core/messages";
 import { createConversationalChain } from "./core/chain.js";
 import { sessionConfig } from "./core/memory.js";
 
-/**
- * Phase 2 demo: proves the graph remembers earlier turns within a session.
- *
- * Sends three messages on the SAME session (thread_id). The facts (budget,
- * date, guest count) are stated up front and then referenced later WITHOUT
- * repeating them, so a correct answer demonstrates working memory.
- *
- * Run with: npm run memory
- */
+// Phase 2 demo: proves multi-turn recall within one session. Run: npm run memory
 async function main() {
   const graph = createConversationalChain();
   const config = sessionConfig(`demo-${Date.now()}`);
