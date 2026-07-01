@@ -27,7 +27,13 @@ async function main() {
       { messages: [new HumanMessage(input)] },
       config
     );
-    const reply = result.messages.at(-1)?.content ?? "(no reply)";
+    const content = result.messages.at(-1)?.content;
+    const reply =
+      typeof content === "string"
+        ? content
+        : content
+          ? JSON.stringify(content)
+          : "(no reply)";
     console.log(`\nAria: ${reply}`);
     console.log("\n" + "-".repeat(60));
   }

@@ -12,7 +12,7 @@ function required(name: string): string {
 }
 
 export const config = {
-  baseURL: process.env.LITELLM_BASE_URL?.trim() || "",
+  baseURL: required("LITELLM_BASE_URL"),
   apiKey: required("LITELLM_API_KEY"),
   model: process.env.LITELLM_MODEL?.trim() || "claude-sonnet-4-6",
 };
