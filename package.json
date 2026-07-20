@@ -7,6 +7,7 @@
     "test:connection": "tsx src/test-connection.ts",
     "chain": "tsx src/run-chain.ts",
     "memory": "tsx src/run-memory.ts",
+    "chat": "tsx src/cli.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
