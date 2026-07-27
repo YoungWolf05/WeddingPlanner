@@ -18,11 +18,12 @@ Available models: `claude-opus-4-8`, `claude-sonnet-4-6`, `gpt-5.1-chat`
 npm run test:connection          # verify LiteLLM reachability — run first after setup
 npm run chain "your message"     # single-turn LCEL chain (Phase 1)
 npm run memory                   # multi-turn memory demo (Phase 2)
+npm run chat                     # streaming terminal REPL (Phase 3)
 npm run typecheck                # type-check without emitting
 npm run build                    # compile to dist/
 ```
 
-No test framework is configured. `test:connection` is the only automated check.
+No test framework is configured. `test:connection` is the only automated runtime connectivity smoke check; `typecheck` and `build` provide compilation checks.
 
 ## Architecture
 
@@ -30,14 +31,15 @@ No test framework is configured. `test:connection` is the only automated check.
 src/
   config.ts          # env loading — single source of truth for baseURL/apiKey/model
   core/
-    model.ts         # createChatModel() — all LiteLLM wiring lives here
+    model.ts         # createChatModel() — application model factory and LiteLLM wiring
     prompts.ts       # WEDDING_PLANNER_SYSTEM_PROMPT + weddingPlannerPrompt (persona: "Aria")
     chain.ts         # Phase 1: createWeddingPlannerChain() (LCEL, stateless)
                      # Phase 2: createConversationalChain() (LangGraph + checkpointer)
     memory.ts        # MemorySaver (in-RAM, resets on exit); sessionConfig() for thread_id
   run-chain.ts       # CLI entrypoint for Phase 1
   run-memory.ts      # CLI entrypoint for Phase 2
-  test-connection.ts # connectivity smoke test
+  cli.ts             # Phase 3 streaming terminal REPL and conversation controls
+  test-connection.ts # smoke test; temporary direct ChatOpenAI exception (Phase 4 debt)
 ```
 
 ## Critical: ESM Import Extensions
@@ -49,18 +51,14 @@ import { config } from "../config.js"; // correct
 import { config } from "../config"; // wrong — will fail at runtime
 ```
 
-## Phased Design
+## Roadmap and phase governance
 
-Code comments reference phases (Phase 1, Phase 2, … Phase 8). Each phase builds on the previous:
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. The current completed milestone is **Phase 3 — Streaming Terminal Product Prototype**. No phase is active; **Phase 4 — Engineering Baseline and Provider Contract** is the next proposed phase.
 
-- **Phase 1** — stateless LCEL chain
-- **Phase 2** — multi-turn LangGraph graph with `MemorySaver`
-- **Phase 8** — swap `MemorySaver` in `src/core/memory.ts` for `SqliteSaver` or Redis (interface is stable, only that file changes)
-
-Preserve this pattern when adding phases.
+Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 
 ## Conventions
 
-- All LLM construction goes through `createChatModel()` in `src/core/model.ts` — do not instantiate `ChatOpenAI` elsewhere.
+- All application LLM construction goes through `createChatModel()` in `src/core/model.ts` — do not instantiate `ChatOpenAI` elsewhere. The direct construction in `src/test-connection.ts` is a temporary Phase 4 cleanup exception, not a pattern for future application code.
 - System prompt / persona changes belong in `src/core/prompts.ts`.
 - TypeScript strict mode is on. Do not disable strict checks or add `any` casts.
