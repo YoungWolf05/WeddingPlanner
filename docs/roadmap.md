@@ -117,9 +117,9 @@ Phase 4 is user-approved and in progress. The next planned phase is not active u
 
 Phase 4 is delivered as ordered, independently verifiable sub-increments. One sub-increment is worked at a time; each must be independently verifiable before the next begins.
 
-- **4a — Test framework and Phase 1–3 regression coverage.** Status: Active (in progress). Introduce Vitest and deterministic, mocked-model, offline tests covering the Phase 1 chain, Phase 2 thread memory, and Phase 3 REPL controls/streaming/cancellation. Tests must run in CI without live proxy calls.
-- **4b — `createChatModel()` centralization.** Status: Planned. Route all chat-model construction through the model factory, including cleanup of the direct `ChatOpenAI` construction in `src/test-connection.ts`.
-- **4c — LiteLLM capability matrix and embedding assessment.** Status: Planned. Verify the chat-model capability matrix for each supported chat alias and separately assess embedding aliases/endpoints. Exposed as an explicit opt-in live command; not run in default CI.
+- **4a — Test framework and Phase 1–3 regression coverage.** Status: Complete. Introduce Vitest and deterministic, mocked-model, offline tests covering the Phase 1 chain, Phase 2 thread memory, and Phase 3 REPL controls/streaming/cancellation. Tests must run in CI without live proxy calls. Delivered: Vitest with deterministic offline Phase 1–3 regression tests (32 tests); reviewed.
+- **4b — `createChatModel()` centralization.** Status: Complete. Route all chat-model construction through the model factory, including cleanup of the direct `ChatOpenAI` construction in `src/test-connection.ts`. Delivered: `src/test-connection.ts` routed through `createChatModel()`; offline guard test (`test/phase4-model-factory.test.ts`) enforces single-factory `ChatOpenAI` construction; 34 offline tests; `npm run typecheck` and `npm run build` pass; reviewed.
+- **4c — LiteLLM capability matrix and embedding assessment.** Status: Active (in progress / next). Verify the chat-model capability matrix for each supported chat alias and separately assess embedding aliases/endpoints. Exposed as an explicit opt-in live command; not run in default CI.
 - **4d — Local tracing with redaction.** Status: Planned. Add local, self-contained tracing with secret/PII redaction and documented observability boundaries. No external SaaS tracing backend.
 - **4e — Evaluation dataset, documentation alignment, and closeout.** Status: Planned. Add a small versioned wedding-planning evaluation dataset (~10–15 prompts) with a mostly deterministic baseline, align roadmap/developer/environment/operational documentation, and complete Phase 4 closeout.
 
@@ -155,10 +155,10 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 
 **Implementation evidence and notes**
 
-- Current model configuration is partial: `src/config.ts` and `src/core/model.ts` centralize application model setup, while `src/test-connection.ts` still constructs `ChatOpenAI` directly.
+- Model construction is centralized (4b): `src/config.ts` and `src/core/model.ts` centralize application model setup, and `src/test-connection.ts` now constructs its model via `createChatModel()`; an offline guard test (`test/phase4-model-factory.test.ts`) enforces single-factory `ChatOpenAI` construction.
 - `src/cli.ts` supports model switching, but this is not a verified provider capability contract.
 - Chat-model and embedding assessments are separate contracts. Chat aliases are not required or evaluated as embedding aliases; embedding results attach only to candidate embedding alias/endpoint pairs.
-- No test framework or lint script currently exists; `npm run test:connection` is the only automated runtime connectivity smoke check and makes a live request.
+- Vitest is in place with deterministic offline Phase 1–3 regression coverage (4a); the full suite is 34 offline tests. `npm run test:connection` remains the only automated runtime connectivity smoke check and makes a live request.
 
 ### Phase 5 — Durable Conversation Service
 

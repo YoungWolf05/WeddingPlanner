@@ -1,4 +1,4 @@
-import { ChatOpenAI } from "@langchain/openai";
+import { createChatModel } from "./core/model.js";
 import { config } from "./config.js";
 
 // Connectivity test: verifies LangChain can reach LiteLLM. Run: npm run test:connection
@@ -10,14 +10,11 @@ async function main() {
   console.log(`API key  : ${config.apiKey.slice(0, 4)}...(hidden)`);
   console.log("");
 
-  const llm = new ChatOpenAI({
-    model: config.model,
-    apiKey: config.apiKey,
-    temperature: 0.7,
-    configuration: {
-      baseURL: config.baseURL,
-    },
-  });
+  // All application model construction goes through the createChatModel()
+  // factory (see AGENTS.md). The factory's defaults already match this smoke
+  // test's prior client settings: config.model / config.apiKey / config.baseURL,
+  // temperature 0.7, non-streaming — so the resulting client is equivalent.
+  const llm = createChatModel();
 
   console.log("Sending a test prompt...\n");
 
