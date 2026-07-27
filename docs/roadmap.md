@@ -6,10 +6,10 @@
 | --- | --- |
 | Last reviewed | 2026-07-27 |
 | Current completed milestone | **Phase 3 — Streaming Terminal Product Prototype** |
-| Active phase | **None** |
-| Next proposed phase | **Phase 4 — Engineering Baseline and Provider Contract** |
+| Active phase | **Phase 4 — Engineering Baseline and Provider Contract** |
+| Next planned phase | **Phase 5 — Durable Conversation Service** |
 
-The next proposed phase is not active until the user approves its activation.
+Phase 4 is user-approved and in progress. The next planned phase is not active until the user approves its activation.
 
 ## Status vocabulary
 
@@ -109,9 +109,28 @@ The next proposed phase is not active until the user approves its activation.
 
 ### Phase 4 — Engineering Baseline and Provider Contract
 
-**Status:** Planned — next proposed phase
+**Status:** Active
 
 **Goal:** Create a dependable engineering baseline and measure the real LiteLLM/provider contract before building provider-dependent features.
+
+**Increment plan**
+
+Phase 4 is delivered as ordered, independently verifiable sub-increments. One sub-increment is worked at a time; each must be independently verifiable before the next begins.
+
+- **4a — Test framework and Phase 1–3 regression coverage.** Status: Active (in progress). Introduce Vitest and deterministic, mocked-model, offline tests covering the Phase 1 chain, Phase 2 thread memory, and Phase 3 REPL controls/streaming/cancellation. Tests must run in CI without live proxy calls.
+- **4b — `createChatModel()` centralization.** Status: Planned. Route all chat-model construction through the model factory, including cleanup of the direct `ChatOpenAI` construction in `src/test-connection.ts`.
+- **4c — LiteLLM capability matrix and embedding assessment.** Status: Planned. Verify the chat-model capability matrix for each supported chat alias and separately assess embedding aliases/endpoints. Exposed as an explicit opt-in live command; not run in default CI.
+- **4d — Local tracing with redaction.** Status: Planned. Add local, self-contained tracing with secret/PII redaction and documented observability boundaries. No external SaaS tracing backend.
+- **4e — Evaluation dataset, documentation alignment, and closeout.** Status: Planned. Add a small versioned wedding-planning evaluation dataset (~10–15 prompts) with a mostly deterministic baseline, align roadmap/developer/environment/operational documentation, and complete Phase 4 closeout.
+
+**Approved decisions (rationale for future readers)**
+
+- **Test framework:** Vitest.
+- **Test strategy:** Deterministic, mocked-model, offline unit/regression tests that run in CI without live proxy calls.
+- **Capability checks:** Live LiteLLM capability checks are an explicit opt-in command, not part of default CI.
+- **Tracing:** Local, self-contained tracing with secret/PII redaction first; no external SaaS backend.
+- **Evaluation set:** A small committed dataset (~10–15 prompts) with a mostly deterministic baseline.
+- **Delivery:** Incremental, one sub-increment at a time (4a → 4e), each independently verifiable.
 
 **Key deliverables**
 

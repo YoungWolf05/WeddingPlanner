@@ -1,0 +1,15 @@
+{
+  // Type-checks the test suite WITHOUT affecting the production build.
+  // The production tsconfig.json has rootDir: "src" and only emits src/**, so
+  // it neither type-checks nor emits the tests. This config extends it, drops
+  // the src-only rootDir/outDir emit settings, and includes test/ so we can
+  // run `tsc -p tsconfig.vitest.json --noEmit` for full type safety of tests.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["test/**/*.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

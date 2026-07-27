@@ -8,8 +8,10 @@
     "chain": "tsx src/run-chain.ts",
     "memory": "tsx src/run-memory.ts",
     "chat": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.vitest.json"
   },
   "keywords": [
     "langchain",
@@ -27,6 +29,7 @@
   "devDependencies": {
     "@types/node": "^26.0.1",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }
