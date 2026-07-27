@@ -76,6 +76,17 @@ describe("Phase 3 — model allow-list", () => {
     expect(isAllowedModel("")).toBe(false);
   });
 
+  it("rejects gpt-5.1-chat — a known-invalid alias the proxy rejects (4c.1)", () => {
+    // Locks the removal: the LiteLLM proxy/key rejects gpt-5.1-chat as an
+    // invalid model name (see docs/capabilities/2026-07-27.md evidence), so it
+    // must no longer be in the allow-list.
+    expect(isAllowedModel("gpt-5.1-chat")).toBe(false);
+  });
+
+  it("advertises exactly the two valid aliases", () => {
+    expect(ALLOWED_MODELS).toEqual(["claude-opus-4-8", "claude-sonnet-4-6"]);
+  });
+
   it("selectInitialModel keeps a supported configured model", () => {
     expect(selectInitialModel("claude-opus-4-8")).toEqual({
       model: "claude-opus-4-8",

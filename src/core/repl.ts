@@ -13,7 +13,6 @@ import type { sessionConfig } from "./memory.js";
 export const ALLOWED_MODELS = [
   "claude-opus-4-8",
   "claude-sonnet-4-6",
-  "gpt-5.1-chat",
 ] as const;
 
 export type AllowedModel = (typeof ALLOWED_MODELS)[number];

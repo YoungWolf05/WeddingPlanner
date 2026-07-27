@@ -10,7 +10,7 @@ Copy `.env.example` to `.env` before running anything. Required:
 - `LITELLM_BASE_URL` — mandatory, app hard-fails without it
 - `LITELLM_MODEL` — optional, defaults to `claude-sonnet-4-6`
 
-Available models: `claude-opus-4-8`, `claude-sonnet-4-6`, `gpt-5.1-chat`
+Available models: `claude-opus-4-8`, `claude-sonnet-4-6`
 
 ## Developer Commands
 

@@ -3,13 +3,18 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-// Phase 4 (increment 4b) — architecture convention guard.
+// Phase 4 — architecture convention guard (4b: ChatOpenAI; 4c: OpenAIEmbeddings).
 //
 // AGENTS.md convention: "All application LLM construction goes through
 // createChatModel() in src/core/model.ts — do not instantiate ChatOpenAI
-// elsewhere." This is a DETERMINISTIC, fully OFFLINE static source scan: it
-// reads the TypeScript sources under src/ and fails if `new ChatOpenAI(`
-// appears anywhere except the single allowed factory (src/core/model.ts).
+// elsewhere." Increment 4c adds the embeddings equivalent: OpenAIEmbeddings must
+// only be constructed in src/core/embeddings.ts (via createEmbeddingsModel()).
+//
+// This is a DETERMINISTIC, fully OFFLINE static source scan: it reads the
+// TypeScript sources under src/ and fails if `new ChatOpenAI(` appears anywhere
+// except src/core/model.ts, or `new OpenAIEmbeddings(` anywhere except
+// src/core/embeddings.ts. Comments and string/template literals are stripped
+// first, so references inside comments (like these) never false-positive.
 //
 // It performs no network calls, needs no credentials, and does not import any
 // application module — so a regression is caught by `npm test` regardless of
@@ -23,10 +28,14 @@ const srcDir = path.join(repoRoot, "src");
 
 // The one and only file permitted to construct ChatOpenAI directly.
 const ALLOWED_FACTORY = path.join(srcDir, "core", "model.ts");
+// The one and only file permitted to construct OpenAIEmbeddings directly.
+const ALLOWED_EMBEDDINGS_FACTORY = path.join(srcDir, "core", "embeddings.ts");
 
 // Matches a direct construction `new ChatOpenAI(` allowing arbitrary whitespace
 // (including newlines) between the keyword, the class name, and the paren.
 const CHAT_OPENAI_CONSTRUCTION = /new\s+ChatOpenAI\s*\(/;
+// Same shape for OpenAIEmbeddings — the embeddings equivalent of the rule above.
+const OPENAI_EMBEDDINGS_CONSTRUCTION = /new\s+OpenAIEmbeddings\s*\(/;
 
 // Recursively collect every *.ts file under a directory.
 async function collectTsFiles(dir: string): Promise<string[]> {
@@ -121,23 +130,36 @@ function stripComments(source: string): string {
   return out;
 }
 
+// Scan every src/ *.ts file (comment/string-stripped) for a direct construction
+// matched by `pattern`, excluding the single allowed factory file. Returns the
+// repo-relative paths of any offenders.
+async function findOffenders(
+  pattern: RegExp,
+  allowedFactory: string
+): Promise<string[]> {
+  const files = await collectTsFiles(srcDir);
+  // Sanity: the scan actually found sources (guards against a broken path
+  // silently passing the assertion).
+  expect(files.length).toBeGreaterThan(0);
+
+  const offenders: string[] = [];
+  for (const file of files) {
+    if (path.resolve(file) === path.resolve(allowedFactory)) continue;
+    const raw = await readFile(file, "utf8");
+    const code = stripComments(raw);
+    if (pattern.test(code)) {
+      offenders.push(path.relative(repoRoot, file));
+    }
+  }
+  return offenders;
+}
+
 describe("Phase 4 — model factory convention guard", () => {
   it("no source file except src/core/model.ts constructs ChatOpenAI directly", async () => {
-    const files = await collectTsFiles(srcDir);
-
-    // Sanity: the scan actually found sources (guards against a broken path
-    // silently passing the assertion).
-    expect(files.length).toBeGreaterThan(0);
-
-    const offenders: string[] = [];
-    for (const file of files) {
-      if (path.resolve(file) === path.resolve(ALLOWED_FACTORY)) continue;
-      const raw = await readFile(file, "utf8");
-      const code = stripComments(raw);
-      if (CHAT_OPENAI_CONSTRUCTION.test(code)) {
-        offenders.push(path.relative(repoRoot, file));
-      }
-    }
+    const offenders = await findOffenders(
+      CHAT_OPENAI_CONSTRUCTION,
+      ALLOWED_FACTORY
+    );
 
     expect(
       offenders,
@@ -155,5 +177,28 @@ describe("Phase 4 — model factory convention guard", () => {
     // to reality and the guard should be revisited.
     const raw = await readFile(ALLOWED_FACTORY, "utf8");
     expect(CHAT_OPENAI_CONSTRUCTION.test(stripComments(raw))).toBe(true);
+  });
+
+  it("no source file except src/core/embeddings.ts constructs OpenAIEmbeddings directly", async () => {
+    const offenders = await findOffenders(
+      OPENAI_EMBEDDINGS_CONSTRUCTION,
+      ALLOWED_EMBEDDINGS_FACTORY
+    );
+
+    expect(
+      offenders,
+      offenders.length === 0
+        ? ""
+        : `Direct \`new OpenAIEmbeddings(\` is only allowed in src/core/embeddings.ts. ` +
+            `All embeddings construction must go through createEmbeddingsModel(). ` +
+            `Offending file(s): ${offenders.join(", ")}`
+    ).toEqual([]);
+  });
+
+  it("src/core/embeddings.ts (the allowed factory) does construct OpenAIEmbeddings", async () => {
+    // Positive control mirroring the ChatOpenAI one: if the embeddings factory
+    // stops constructing OpenAIEmbeddings, this guard no longer maps to reality.
+    const raw = await readFile(ALLOWED_EMBEDDINGS_FACTORY, "utf8");
+    expect(OPENAI_EMBEDDINGS_CONSTRUCTION.test(stripComments(raw))).toBe(true);
   });
 });
