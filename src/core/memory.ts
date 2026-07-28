@@ -59,6 +59,25 @@ export function getCheckpointer(): BaseCheckpointSaver {
   return sharedCheckpointer;
 }
 
+// Phase 5 (5b): expose the shared checkpointer as its concrete SqliteSaver so
+// the thread-ownership store (src/core/threads.ts) can SHARE the same
+// better-sqlite3 connection and transact atomically across the ownership table
+// and the checkpoint tables. This is the one intentional place that narrows to
+// the concrete durable saver; consumers of conversation state still depend only
+// on BaseCheckpointSaver via getCheckpointer(). When the checkpointer is later
+// swapped to Postgres, the ownership store gets its own matching accessor and
+// this SQLite-specific narrowing is removed together with the SQLite saver.
+export function getSqliteSaver(): SqliteSaver {
+  const saver = getCheckpointer();
+  if (!(saver instanceof SqliteSaver)) {
+    throw new Error(
+      "Shared checkpointer is not a SqliteSaver; the thread-ownership store " +
+        "requires the SQLite backend to share its connection."
+    );
+  }
+  return saver;
+}
+
 // Scopes a conversation to one session; pass as the second arg to invoke/stream.
 export function sessionConfig(sessionId: string) {
   return { configurable: { thread_id: sessionId } };
