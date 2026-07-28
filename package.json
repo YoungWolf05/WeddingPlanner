@@ -10,6 +10,7 @@
     "chain": "tsx src/run-chain.ts",
     "memory": "tsx src/run-memory.ts",
     "chat": "tsx src/cli.ts",
+    "serve": "tsx src/run-server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsc",
