@@ -12,6 +12,10 @@ dist/
 *.log
 npm-debug.log*
 
+# Local tracing output (Phase 4 / 4d). Trace events are written locally as
+# newline-delimited JSON with secrets/PII redacted; never commit them.
+logs/
+
 # OS
 .DS_Store
 Thumbs.db

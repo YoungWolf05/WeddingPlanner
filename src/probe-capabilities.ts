@@ -7,6 +7,7 @@ import path from "node:path";
 import { config } from "./config.js";
 import { createChatModel } from "./core/model.js";
 import { createEmbeddingsModel } from "./core/embeddings.js";
+import { redactError as redactErrorShared } from "./core/redaction.js";
 import {
   CHAT_CAPABILITIES,
   classifyAbortOutcome,
@@ -61,17 +62,20 @@ function maskKey(rawKey: string): string {
 }
 
 // Reduce any error to a concise, redacted single-line reason. Strips the base
-// URL and API key if they ever appear in a provider error string.
+// URL and API key if they ever appear in a provider error string, and also
+// scrubs basic PII (email addresses, phone numbers).
+//
+// Phase 4 (increment 4d): the redaction logic now lives in the shared, unit-
+// tested src/core/redaction.ts so the probe and the tracing layer scrub through
+// ONE implementation. We pin the probe's original 200-character cap (redactText's
+// default is larger) so evidence lines stay bounded as before. Note: secret
+// scrubbing and the 200-char cap are unchanged from the pre-extraction probe;
+// PII scrubbing (email/phone -> [redacted-email]/[redacted-phone]) is an
+// intentional, locked-in security IMPROVEMENT the shared helper adds — probe
+// evidence must never leak PII either. This is pinned by an offline test.
+const PROBE_REDACT_MAX = 200;
 function redactError(err: unknown): string {
-  let message =
-    err instanceof Error ? err.message : typeof err === "string" ? err : String(err);
-  // Collapse whitespace/newlines to one line and cap length.
-  message = message.replace(/\s+/g, " ").trim();
-  // Defensive scrub of any secret substrings.
-  if (config.apiKey) message = message.split(config.apiKey).join("[redacted-key]");
-  if (config.baseURL) message = message.split(config.baseURL).join("[redacted-url]");
-  const MAX = 200;
-  return message.length > MAX ? message.slice(0, MAX) + "…" : message;
+  return redactErrorShared(err, PROBE_REDACT_MAX);
 }
 
 // --- Timeout wrapper --------------------------------------------------------
@@ -432,8 +436,12 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  // Top-level guard: the run should be resilient, but never leak a raw secret.
+  // Top-level guard: the run should be resilient, but never leak a raw secret or
+  // PII. Defense-in-depth (4d R4): route the reason through the shared redaction
+  // (same 200-char probe cap) so an unexpected top-level failure cannot print an
+  // unredacted apiKey/baseURL/email/phone to stderr. Control flow and exit code
+  // are unchanged.
   process.stderr.write("\nCapability probe FAILED unexpectedly.\n");
-  process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
+  process.stderr.write(redactError(err) + "\n");
   process.exit(1);
 });
