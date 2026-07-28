@@ -16,6 +16,15 @@ npm-debug.log*
 # newline-delimited JSON with secrets/PII redacted; never commit them.
 logs/
 
+# Durable conversation state (Phase 5 / 5a). The local SQLite checkpoint
+# database (default ./data/checkpoints.sqlite; overridable via CHECKPOINT_DB_PATH)
+# holds conversation history and must never be committed. Ignore the whole data/
+# directory plus any stray SQLite files (incl. WAL/SHM sidecars).
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # OS
 .DS_Store
 Thumbs.db

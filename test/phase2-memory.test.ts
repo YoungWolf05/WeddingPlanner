@@ -1,18 +1,35 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   HumanMessage,
   AIMessage,
   SystemMessage,
   type BaseMessage,
 } from "@langchain/core/messages";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import type { BaseCheckpointSaver } from "@langchain/langgraph";
 import { recordedCalls, resetRecordedCalls } from "./helpers/fake-model.js";
 
 // Mock only the model boundary; the real LangGraph StateGraph, MessagesAnnotation
-// reducer, and MemorySaver checkpointer all run so we test genuine multi-turn
-// memory behavior, not a stub of it.
+// reducer, and the durable SQLite checkpointer all run so we test genuine
+// multi-turn memory behavior, not a stub of it.
 //
 // Each turn's fake response is deterministic; the recorder captures the messages
 // the model receives per turn so we can prove history accumulation + isolation.
+//
+// Phase 5 (5a): the default checkpointer is now durable SQLite. To keep this
+// suite OFFLINE, deterministic, and repo-clean, each test injects an isolated
+// temp-file checkpointer (via createConversationalChain's saver argument) rather
+// than the shared default — so no ./data DB is ever created in the repo.
 vi.mock("../src/core/model.js", async () => {
   const { makeFakeChatModel } = await import("./helpers/fake-model.js");
   return {
@@ -25,7 +42,9 @@ vi.mock("../src/core/model.js", async () => {
 });
 
 const { createConversationalChain } = await import("../src/core/chain.js");
-const { sessionConfig } = await import("../src/core/memory.js");
+const { createCheckpointer, sessionConfig } = await import(
+  "../src/core/memory.js"
+);
 const { WEDDING_PLANNER_SYSTEM_PROMPT } = await import(
   "../src/core/prompts.js"
 );
@@ -39,8 +58,25 @@ async function invokeTurn(
 }
 
 describe("Phase 2 — conversational memory", () => {
-  beforeEach(() => {
+  let tempDir: string;
+  let saver: BaseCheckpointSaver;
+
+  // Build a graph bound to this test's isolated temp-file checkpointer.
+  function makeGraph() {
+    return createConversationalChain({}, saver);
+  }
+
+  beforeEach(async () => {
     resetRecordedCalls();
+    tempDir = await mkdtemp(path.join(tmpdir(), "wp-phase2-"));
+    saver = createCheckpointer(path.join(tempDir, "checkpoints.sqlite"));
+  });
+
+  afterEach(async () => {
+    // Release the SQLite handle (required on Windows before deletion), then
+    // remove the temp directory so no db artifacts survive the suite.
+    if (saver instanceof SqliteSaver) saver.db.close();
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("sessionConfig returns { configurable: { thread_id } }", () => {
@@ -50,7 +86,7 @@ describe("Phase 2 — conversational memory", () => {
   });
 
   it("compiles and injects the Aria persona on every call (callModel)", async () => {
-    const graph = createConversationalChain();
+    const graph = makeGraph();
     const cfg = sessionConfig("persona-thread");
 
     await invokeTurn(graph, "hello", cfg);
@@ -65,7 +101,7 @@ describe("Phase 2 — conversational memory", () => {
   });
 
   it("accumulates history across two turns on the SAME thread_id", async () => {
-    const graph = createConversationalChain();
+    const graph = makeGraph();
     const cfg = sessionConfig("same-thread");
 
     await invokeTurn(graph, "We have 120 guests.", cfg);
@@ -94,7 +130,7 @@ describe("Phase 2 — conversational memory", () => {
   });
 
   it("isolates history between DIFFERENT thread_ids", async () => {
-    const graph = createConversationalChain();
+    const graph = makeGraph();
 
     await invokeTurn(graph, "Secret from thread A.", sessionConfig("thread-A"));
     // A different thread must NOT see thread A's history.

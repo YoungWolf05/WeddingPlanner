@@ -6,10 +6,11 @@ import {
   END,
   StateGraph,
   MessagesAnnotation,
+  type BaseCheckpointSaver,
 } from "@langchain/langgraph";
 import { createChatModel, type ModelOptions } from "./model.js";
 import { weddingPlannerPrompt, WEDDING_PLANNER_SYSTEM_PROMPT } from "./prompts.js";
-import { checkpointer } from "./memory.js";
+import { getCheckpointer } from "./memory.js";
 
 export interface ChainInput {
   input: string;
@@ -37,8 +38,18 @@ export function createWeddingPlannerChain(
 
 // Phase 2: conversational graph with multi-turn memory via a LangGraph
 // checkpointer (keyed by session/thread_id). System persona injected per call.
-export function createConversationalChain(options: ModelOptions = {}) {
+//
+// Phase 5 (5a): the checkpointer is now durable (SQLite). By default the graph
+// uses the shared checkpointer (getCheckpointer, constructed lazily); an explicit
+// `saver` may be passed to bind an isolated checkpointer (e.g. a temp-file SQLite
+// instance in tests) without changing default application behavior.
+export function createConversationalChain(
+  options: ModelOptions = {},
+  saver?: BaseCheckpointSaver
+) {
   const model = createChatModel(options);
+  // Default to the shared durable checkpointer, constructed lazily on first use.
+  const checkpointer = saver ?? getCheckpointer();
 
   async function callModel(state: typeof MessagesAnnotation.State) {
     const messages = [

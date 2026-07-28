@@ -6,10 +6,10 @@
 | --- | --- |
 | Last reviewed | 2026-07-28 |
 | Current completed milestone | **Phase 4 — Engineering Baseline and Provider Contract** |
-| Active phase | **None** |
-| Next proposed phase | **Phase 5 — Durable Conversation Service** |
+| Active phase | **Phase 5 — Durable Conversation Service** |
+| Next proposed phase | **Phase 6 — Structured Domain Data and Safe Tools** |
 
-Phase 4 is complete. Phase 5 is proposed and not active until the user approves its activation.
+Phase 4 is complete. Phase 5 is user-approved and in progress. Phase 6 is the next proposed phase and is not active until the user approves its activation.
 
 ## Status vocabulary
 
@@ -171,9 +171,27 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 
 ### Phase 5 — Durable Conversation Service
 
-**Status:** Planned
+**Status:** Active
 
 **Goal:** Move volatile conversation state behind a secure, durable service boundary.
+
+**Increment plan**
+
+Phase 5 is delivered as ordered, independently verifiable sub-increments. One sub-increment is worked at a time; each must be independently verifiable before the next begins.
+
+- **5a — Durable SQLite checkpointer.** Status: Complete. Replace the process-local `MemorySaver` with a durable SQLite checkpointer behind the existing checkpointer interface so conversation state survives a process restart. Structured so the checkpointer is swappable to PostgreSQL later without changing callers. Deterministic offline tests use temp SQLite files/temp dirs and a mocked model. Delivered: durable SQLite LangGraph checkpointer (`@langchain/langgraph-checkpoint-sqlite`) behind the existing `BaseCheckpointSaver` interface, replacing the in-RAM `MemorySaver` so conversation state survives a process restart; `src/core/memory.ts` provides `createCheckpointer(dbPath?)`, `resolveCheckpointDbPath(dbPath?)`, and a lazy memoized `getCheckpointer()` (import has no filesystem side effect), with default DB `./data/checkpoints.sqlite` configurable via `CHECKPOINT_DB_PATH` (kept out of the `LITELLM_` namespace) and parent dir auto-created; `createConversationalChain(options, saver?)` is backward-compatible with an optional injected saver and `sessionConfig`/`thread_id` are unchanged; interface remains swappable to PostgreSQL later without changing callers; 154 offline tests (added restart-survival, cross-restart thread isolation, factory/path-resolution, repo-cleanliness guard); `npm run typecheck` and `npm run build` pass; reviewed (Ready for merge, no blocking/recommended findings).
+- **5b — Thread identity & ownership model.** Status: Active (in progress / next). Server-issued UUID thread identifiers, an ownership store, and access checks enforcing thread ownership; list/get/delete operations scoped to the owner; retention/deletion policy. `thread_id` remains a conversation key and is never treated as identity.
+- **5c — Authenticated HTTP service + SSE streaming.** Status: Planned. A thin custom Node HTTP API for thread create/list/get/delete plus a streaming chat endpoint, bearer-token/user-id auth middleware, a versioned typed Server-Sent Events (SSE) event contract independent of the terminal tuple format, and per-turn cancellation.
+- **5d — Hardening & docs.** Status: Planned. Concurrency behavior, restart/durability validation, retention behavior, README/AGENTS/roadmap alignment, and Phase 5 closeout.
+
+**Approved decisions (rationale for future readers)**
+
+- **Persistence backend:** SQLite checkpointer now — durable across restarts with no additional infrastructure — structured so the checkpointer is swappable to PostgreSQL later without changing callers.
+- **Service boundary:** A thin custom Node HTTP API in this repository (not the LangGraph Agent Server), keeping everything local with full control over auth.
+- **Auth / thread ownership:** A simple authenticated bearer-token / user-id scheme; the service enforces thread ownership. `thread_id` is a conversation key, never identity. Full SSO/OIDC is out of scope for this local baseline, but the ownership model is built correctly.
+- **Streaming / API contract:** Server-Sent Events (SSE) with a versioned, typed event contract that is independent of the terminal tuple format.
+- **Scope:** Phase 5 is the durable conversation service only (persistence, thread create/list/get/delete with ownership, resume-after-restart, authenticated streaming chat endpoint, retention/deletion, tests). The web UI stays Phase 9; tools/RAG stay in their later phases.
+- **Testing:** Service/persistence/ownership/restart tests are deterministic and OFFLINE (mocked model, temp SQLite files/temp dirs) and part of `npm test`; any real end-to-end run stays opt-in/manual.
 
 **Key deliverables**
 
@@ -192,8 +210,8 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 
 **Implementation evidence and notes**
 
-- The current `MemorySaver` in `src/core/memory.ts` is process-local and does not satisfy this phase.
-- `src/core/memory.ts` has a stale legacy comment assigning persistence to Phase 8. This roadmap's Phase 5 supersedes that comment; correct it as Phase 5 implementation housekeeping. Recording this debt does not activate Phase 5.
+- The process-local `MemorySaver` in `src/core/memory.ts` did not satisfy this phase; 5a replaced it with a durable SQLite checkpointer behind the existing `BaseCheckpointSaver` interface (`createCheckpointer`/`getCheckpointer`, `CHECKPOINT_DB_PATH` config), so conversation state now survives a process restart.
+- The stale comment in `src/core/memory.ts` that attributed the persistent-saver swap to "Phase 8" has been corrected to Phase 5 as part of 5a (source changed under 5a, not by this roadmap edit).
 
 ### Phase 6 — Structured Domain Data and Safe Tools
 
@@ -340,3 +358,5 @@ Add one concise row only after approval; do not use this table as a session log.
 | Date | Phase | Approved transition | Approval reference | Exit criteria and verification evidence |
 | --- | --- | --- | --- | --- |
 | 2026-07-28 | Phase 4 | Active → Complete; Phase 5 becomes next proposed phase | User-approved Phase 4 closeout | All Phase 4 exit criteria ticked above; [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md), [`docs/eval/2026-07-28.md`](eval/2026-07-28.md); 149 offline tests, `npm run typecheck` and `npm run build` pass |
+| 2026-07-28 | Phase 5 | Planned → Active (user-approved); next proposed phase becomes Phase 6 | User-approved Phase 5 activation with approved design decisions | 5a in progress; no Phase 5 exit criteria met yet; increment plan and approved decisions recorded above |
+| 2026-07-28 | Phase 5 | 5a Complete under active Phase 5; 5b becomes active | User-approved 5a delivery/review | Durable SQLite checkpointer behind `BaseCheckpointSaver` (survives restart), `createCheckpointer`/`getCheckpointer` + `CHECKPOINT_DB_PATH`; 154 offline tests incl. restart-survival + isolation; `npm run typecheck` and `npm run build` pass; reviewed. Phase 5 remains Active (top-level exit criteria unticked; closeout is 5d) |
