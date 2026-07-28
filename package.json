@@ -6,6 +6,7 @@
   "scripts": {
     "test:connection": "tsx src/test-connection.ts",
     "test:capabilities": "tsx src/probe-capabilities.ts",
+    "eval": "tsx src/run-eval.ts",
     "chain": "tsx src/run-chain.ts",
     "memory": "tsx src/run-memory.ts",
     "chat": "tsx src/cli.ts",

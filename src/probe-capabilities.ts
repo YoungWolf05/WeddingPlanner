@@ -319,7 +319,15 @@ async function probeStructuredOutput(alias: string): Promise<ProbeResult> {
     country: z.string().describe("the country name"),
   });
   try {
-    const model = createChatModel({ model: alias, temperature: 0 });
+    // Omit temperature (temperature: null) for THIS probe only. Some models
+    // (e.g. claude-opus-4-8) DEPRECATE an explicit temperature on their
+    // structured-output path and error when one is sent — an incidental
+    // parameter constraint, not a feature limitation. Omitting temperature
+    // removes that false Error so we get a TRUE Supported/Degraded/Unsupported
+    // reading of the structured-output feature. Scope is intentionally limited
+    // to structured output; the other capability probes keep temperature: 0 so
+    // their semantics are unchanged.
+    const model = createChatModel({ model: alias, temperature: null });
     const structured = model.withStructuredOutput(schema, { name: "location" });
     const res = await withTimeout(PROBE_TIMEOUT_MS, (signal) =>
       structured.invoke("What city is the Eiffel Tower in? Provide city and country.", { signal })
@@ -387,7 +395,7 @@ async function main(): Promise<void> {
   const host = baseUrlHost(config.baseURL);
   const masked = maskKey(config.apiKey);
 
-  process.stderr.write("LiteLLM capability probe (LIVE) — Phase 4 / 4c\n");
+  process.stderr.write("LiteLLM capability probe (LIVE) — opt-in\n");
   process.stderr.write(`Base URL host : ${host}\n`);
   process.stderr.write(`API key       : ${masked} (masked)\n`);
   process.stderr.write(`Run (UTC)     : ${runTimestampUtc}\n\n`);
@@ -421,9 +429,9 @@ async function main(): Promise<void> {
   process.stdout.write("\n" + renderConsoleTable(matrix) + "\n\n");
   process.stdout.write(renderConsoleEmbeddings(matrix) + "\n\n");
 
-  // Write the dated Markdown evidence file. If a file for today already exists,
-  // we overwrite it deterministically (the embedded UTC run timestamp records
-  // the exact run), so re-running the same day yields one authoritative file.
+  // Write the dated Markdown evidence file. Re-running the same day overwrites
+  // it deterministically; the embedded UTC run timestamp records the exact run,
+  // so a same-day re-run yields one authoritative file per date.
   const testDir = path.dirname(fileURLToPath(import.meta.url));
   const repoRoot = path.resolve(testDir, "..");
   const outDir = path.join(repoRoot, "docs", "capabilities");
