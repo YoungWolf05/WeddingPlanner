@@ -78,7 +78,7 @@ import { config } from "../config"; // wrong — will fail at runtime
 
 ## Roadmap and phase governance
 
-[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. The current completed milestone is **Phase 3 — Streaming Terminal Product Prototype**. No phase is active; **Phase 4 — Engineering Baseline and Provider Contract** is the next proposed phase.
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. The current completed milestone is **Phase 4 — Engineering Baseline and Provider Contract**. No phase is active; **Phase 5 — Durable Conversation Service** is the next proposed phase.
 
 Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 

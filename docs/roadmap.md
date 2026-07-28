@@ -4,12 +4,12 @@
 
 | Field | Value |
 | --- | --- |
-| Last reviewed | 2026-07-27 |
-| Current completed milestone | **Phase 3 — Streaming Terminal Product Prototype** |
-| Active phase | **Phase 4 — Engineering Baseline and Provider Contract** |
-| Next planned phase | **Phase 5 — Durable Conversation Service** |
+| Last reviewed | 2026-07-28 |
+| Current completed milestone | **Phase 4 — Engineering Baseline and Provider Contract** |
+| Active phase | **None** |
+| Next proposed phase | **Phase 5 — Durable Conversation Service** |
 
-Phase 4 is user-approved and in progress. The next planned phase is not active until the user approves its activation.
+Phase 4 is complete. Phase 5 is proposed and not active until the user approves its activation.
 
 ## Status vocabulary
 
@@ -109,7 +109,7 @@ Phase 4 is user-approved and in progress. The next planned phase is not active u
 
 ### Phase 4 — Engineering Baseline and Provider Contract
 
-**Status:** Active
+**Status:** Complete
 
 **Goal:** Create a dependable engineering baseline and measure the real LiteLLM/provider contract before building provider-dependent features.
 
@@ -122,7 +122,7 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 - **4c — LiteLLM capability matrix and embedding assessment.** Status: Complete. Verify the chat-model capability matrix for each supported chat alias and separately assess embedding aliases/endpoints. Exposed as an explicit opt-in live command; not run in default CI. Delivered: opt-in `npm run test:capabilities` live probe plus a dated capability matrix ([`docs/capabilities/2026-07-27.md`](capabilities/2026-07-27.md)); single-factory guards extended so only `src/core/model.ts` constructs `ChatOpenAI` and only `src/core/embeddings.ts` constructs `OpenAIEmbeddings`; host-only secret redaction with fully masked key; 55 offline tests; `npm run typecheck` and `npm run build` pass; reviewed. See "4c findings and open items" below for caveats.
 - **4c.1 — Alias reconciliation.** Status: Complete. Remove the invalid `gpt-5.1-chat` alias confirmed rejected by the key/proxy and reconcile the documented alias list. Delivered: `gpt-5.1-chat` removed from the allow-list (`src/core/repl.ts`), `AGENTS.md`, `.env.example`, and the probe alias set, with tests locking its rejection and pinning `ALLOWED_MODELS` to `["claude-opus-4-8", "claude-sonnet-4-6"]`; 57 offline tests; `npm run typecheck` and `npm run build` pass; reviewed.
 - **4d — Local tracing with redaction.** Status: Complete. Add local, self-contained tracing with secret/PII redaction and documented observability boundaries. No external SaaS tracing backend. Delivered: opt-in local tracing integrated at the `createChatModel()` boundary via a LangChain callback handler (off by default; enabled with `LITELLM_TRACE=1`, `TRACE=1` alias, `LITELLM_TRACE` authoritative including `=0` disabling even when `TRACE=1`); metadata-only by default (timestamp, model alias, operation, latency, usage when present, outcome, streaming flag, redacted error reason) with optional content capture off by default and redacted when enabled; pluggable sinks (default JSONL to gitignored `logs/`, optional stderr console sink) whose failures are swallowed and never crash a run; always-on, non-disableable redaction scrubs the LiteLLM `apiKey`/`baseURL` plus basic PII (email/phone) with cap-after-scrub so truncation cannot leak a secret; shared redaction extracted to `src/core/redaction.ts` and reused by the probe (which now additionally redacts PII and redacts its top-level stderr path). Trace output goes to gitignored `logs/` only — no secrets/PII, local only. 110 offline tests; `npm run typecheck` and `npm run build` pass; reviewed (Ready, no blocking/recommended findings).
-- **4e — Evaluation dataset, documentation alignment, and closeout.** Status: Active (in progress / next). Add a small versioned wedding-planning evaluation dataset (~10–15 prompts) with a mostly deterministic baseline, align roadmap/developer/environment/operational documentation (including `AGENTS.md` architecture/tracing alignment), and complete Phase 4 closeout.
+- **4e — Evaluation dataset, documentation alignment, and closeout.** Status: Complete. Add a small versioned wedding-planning evaluation dataset (~10–15 prompts) with a mostly deterministic baseline, align roadmap/developer/environment/operational documentation (including `AGENTS.md` architecture/tracing alignment), and complete Phase 4 closeout. Delivered: a temperature-omit factory option (`createChatModel({ temperature: null })`); a definitive re-probe resolving `claude-opus-4-8` structured output to `Supported` when temperature is omitted (previously undetermined because the factory-injected temperature tripped a model deprecation on the structured path); `gemini-embedding-001` embeddings verified `Supported` at 768 dimensions ([`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md)); a versioned eval dataset at `evals/dataset.jsonl` with pure offline property scorers (`src/core/eval.ts`); an opt-in `npm run eval` live runner and a dated baseline ([`docs/eval/2026-07-28.md`](eval/2026-07-28.md), claude-sonnet-4-6, 12/12 items, 100%); documentation alignment and evidence signposts; 149 offline tests; `npm run typecheck` and `npm run build` pass; reviewed.
 
 **Approved decisions (rationale for future readers)**
 
@@ -147,12 +147,12 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 
 **Exit criteria**
 
-- [ ] Tests deterministically cover the Phase 1 chain, Phase 2 thread memory, and Phase 3 REPL controls/streaming/cancellation without requiring uncontrolled live calls.
-- [ ] All chat model clients, including connectivity checks, are created through the model factory.
-- [ ] The chat-model matrix records dated `Supported`, `Unsupported`, `Degraded`, or `N/A` results for every supported chat alias and assessed chat capability.
-- [ ] The separate embedding assessment records the proxy endpoint, candidate embedding aliases, and a dated state for each assessment.
-- [ ] Traces demonstrate useful diagnostics without exposing credentials or designated sensitive data.
-- [ ] The evaluation baseline runs repeatably and documentation matches actual commands and behavior.
+- [x] Tests deterministically cover the Phase 1 chain, Phase 2 thread memory, and Phase 3 REPL controls/streaming/cancellation without requiring uncontrolled live calls. (4a; offline Vitest suite, 149 tests.)
+- [x] All chat model clients, including connectivity checks, are created through the model factory. (4b; enforced by the single-factory guard test `test/phase4-model-factory.test.ts`.)
+- [x] The chat-model matrix records dated `Supported`, `Unsupported`, `Degraded`, or `N/A` results for every supported chat alias and assessed chat capability. (4c/4e; [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md) records dated states for `claude-opus-4-8` and `claude-sonnet-4-6` — note `claude-opus-4-8` structured output is `Supported` only when temperature is omitted.)
+- [x] The separate embedding assessment records the proxy endpoint, candidate embedding aliases, and a dated state for each assessment. (4e; `gemini-embedding-001` = `Supported` at 768 dimensions in [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md) — the embedding-readiness gate is now MET.)
+- [x] Traces demonstrate useful diagnostics without exposing credentials or designated sensitive data. (4d; opt-in local tracing at the `createChatModel()` boundary with always-on secret/PII redaction, JSONL/console sinks, off by default.)
+- [x] The evaluation baseline runs repeatably and documentation matches actual commands and behavior. (4e; `npm run eval` over `evals/dataset.jsonl` with a dated baseline at [`docs/eval/2026-07-28.md`](eval/2026-07-28.md).)
 
 **Implementation evidence and notes**
 
@@ -163,11 +163,11 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 - Local tracing (4d) is delivered: `src/core/tracing.ts` wires an opt-in LangChain callback handler at the `createChatModel()` boundary (off by default; `LITELLM_TRACE` authoritative, `TRACE` alias), emitting metadata-only records by default with optional redacted content capture, to pluggable sinks (default JSONL to gitignored `logs/`, optional stderr) whose failures are swallowed. Redaction is shared in `src/core/redaction.ts` (always-on secret + PII scrubbing with cap-after-scrub) and reused by `src/probe-capabilities.ts`. Trace output stays local in gitignored `logs/` and carries no secrets/PII.
 - Capability assessment (4c) is delivered: `src/core/capabilities.ts` provides pure capability rendering and `classifyAbortOutcome` logic, `src/core/embeddings.ts` is the embeddings factory, and `src/probe-capabilities.ts` backs the opt-in `npm run test:capabilities` live probe (not in `npm test`/CI). Offline coverage adds capability rendering and abort-classification tests. The architecture guard is extended so only `src/core/model.ts` constructs `ChatOpenAI` and only `src/core/embeddings.ts` constructs `OpenAIEmbeddings`. A dated matrix is recorded at [`docs/capabilities/2026-07-27.md`](capabilities/2026-07-27.md).
 
-**4c findings and open items (do not read as met exit criteria)**
+**4c findings and open items (resolved at Phase 4 closeout)**
 
-- The chat-capability matrix run recorded results for the then-listed aliases with dated results; the invalid `gpt-5.1-chat` alias has since been removed (4c.1), leaving two supported chat aliases (`claude-opus-4-8`, `claude-sonnet-4-6`). The dated matrix at [`docs/capabilities/2026-07-27.md`](capabilities/2026-07-27.md) was captured when three aliases were probed and still records `gpt-5.1-chat` as `Error`; that historical record is intentionally preserved. `claude-sonnet-4-6` is fully `Supported` across invoke, streaming, abort, usage, tool-calling, and structured output. `claude-opus-4-8` is `Supported` except structured output, which is currently **undetermined**: it recorded `Error` because the factory-injected `temperature` tripped a model deprecation on that structured path, not a definitive feature rejection. A definitive re-probe via a temperature-omitting path is required before claiming `Supported` or `Unsupported`.
-- `gpt-5.1-chat` reconciliation is **RESOLVED** (4c.1). The alias was confirmed invalid on this key/proxy ("Invalid model name") and removed from the allow-list (`src/core/repl.ts`), documentation (`AGENTS.md`), `.env.example`, and the probe alias set, with tests locking its rejection (`isAllowedModel("gpt-5.1-chat") === false`; `ALLOWED_MODELS` is exactly `["claude-opus-4-8", "claude-sonnet-4-6"]`). The dated matrix at [`docs/capabilities/2026-07-27.md`](capabilities/2026-07-27.md) preserves the historical `Error` result.
-- The embedding-readiness gate remains unmet. Embeddings are `N/A` because no `LITELLM_EMBED_MODEL` is configured; a real embedding alias must be verified `Supported` (dated) before the gate is satisfied. This still blocks Phase 7 and Phase 8 activation.
+- **`claude-opus-4-8` structured output — RESOLVED (`Supported` with temperature omitted).** A definitive re-probe via a temperature-omitting path confirmed structured output is `Supported` for `claude-opus-4-8` (dated evidence: [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md)). The earlier `Error` was caused by the factory-injected `temperature` tripping a model deprecation on the structured path, not a feature rejection. `claude-sonnet-4-6` remains fully `Supported` across invoke, streaming, abort, usage, tool-calling, and structured output. **Carry-forward constraint for Phase 6:** application structured-output calls to `claude-opus-4-8` must omit temperature (construct the model via `createChatModel({ temperature: null })`) or the model errors on its structured-output path.
+- **`gpt-5.1-chat` reconciliation — RESOLVED (4c.1).** The alias was confirmed invalid on this key/proxy ("Invalid model name") and removed from the allow-list (`src/core/repl.ts`), documentation (`AGENTS.md`), `.env.example`, and the probe alias set, with tests locking its rejection (`isAllowedModel("gpt-5.1-chat") === false`; `ALLOWED_MODELS` is exactly `["claude-opus-4-8", "claude-sonnet-4-6"]`). The historical matrix at [`docs/capabilities/2026-07-27.md`](capabilities/2026-07-27.md) preserves the `Error` result from when three aliases were probed.
+- **Embedding-readiness gate — RESOLVED / MET.** `gemini-embedding-001` is verified `Supported` at 768 dimensions (dated evidence: [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md)). The gate no longer blocks Phase 7 or Phase 8 activation. For those phases, `LITELLM_EMBED_MODEL` should be set to a verified embedding alias.
 
 ### Phase 5 — Durable Conversation Service
 
@@ -331,12 +331,12 @@ Phase 4 is delivered as ordered, independently verifiable sub-increments. One su
 5. Stabilize and version the typed event contract before frontend integration.
 6. Keep authentication/authorization context separate from `thread_id`; a thread identifier is not proof of identity or access.
 7. Let LiteLLM own provider aliases, routing, and fallback where possible; avoid duplicating that policy in application code.
-8. Do not activate Phase 7 or Phase 8 until an approved embedding alias and endpoint have been verified through the proxy.
+8. Do not activate Phase 7 or Phase 8 until an approved embedding alias and endpoint have been verified through the proxy. This gate is now MET: `gemini-embedding-001` is verified `Supported` at 768 dimensions ([`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md)); set `LITELLM_EMBED_MODEL` to a verified embedding alias for those phases.
 
 ## Phase-transition record
 
-No transition after this 2026-07-27 baseline review has been recorded. Add one concise row only after approval; do not use this table as a session log.
+Add one concise row only after approval; do not use this table as a session log.
 
 | Date | Phase | Approved transition | Approval reference | Exit criteria and verification evidence |
 | --- | --- | --- | --- | --- |
-| YYYY-MM-DD | Phase N | Planned → Active or Active → Complete | User decision reference | Links to criteria, commands/results, tests, and relevant repository paths |
+| 2026-07-28 | Phase 4 | Active → Complete; Phase 5 becomes next proposed phase | User-approved Phase 4 closeout | All Phase 4 exit criteria ticked above; [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md), [`docs/eval/2026-07-28.md`](eval/2026-07-28.md); 149 offline tests, `npm run typecheck` and `npm run build` pass |
