@@ -157,7 +157,7 @@ import { config } from "../config"; // wrong — will fail at runtime
 
 ## Roadmap and phase governance
 
-[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 4 — Engineering Baseline and Provider Contract** is complete. **Phase 5 — Durable Conversation Service** is the ACTIVE phase and is in progress: increments 5a (durable SQLite checkpointer), 5b (thread identity & ownership), and 5c (authenticated HTTP service + SSE) are complete, and 5d (hardening, concurrency/restart/retention validation, docs alignment) is in progress. Phase 5 is NOT complete — top-level Phase 5 exit criteria remain unticked and closeout is a separate manager step.
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 5 — Durable Conversation Service** is complete (all five Phase 5 exit criteria met with recorded evidence; increments 5a–5e delivered, reviewed, and covered by the offline suite). No phase is currently active. **Phase 6 — Structured Domain Data and Safe Tools** is the next proposed phase and is NOT active until the user approves its activation.
 
 Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 
