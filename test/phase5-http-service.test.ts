@@ -721,6 +721,7 @@ describe("Phase 5 (5c) — cancellation & redaction", () => {
       getThread: (ownerId, threadId) => realStore.getThread(ownerId, threadId),
       deleteThread: (ownerId, threadId) =>
         realStore.deleteThread(ownerId, threadId),
+      pruneThreads: (policy) => realStore.pruneThreads(policy),
       touchThread: () => {
         throw new Error(leakyTouchMessage);
       },

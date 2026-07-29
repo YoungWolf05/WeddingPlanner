@@ -41,4 +41,18 @@ export const config = {
   // because a service with no tokens would reject every request. Tokens are
   // SECRETS: never commit real values; .env is gitignored.
   authTokensRaw: process.env.AUTH_TOKENS?.trim() || undefined,
+  // Phase 5 (5d): HTTP server hardening timeouts, in milliseconds. All optional;
+  // kept RAW here and parsed by the entrypoint (src/run-server.ts), which falls
+  // back to the documented defaults (headers 10_000 / request 30_000 / SSE idle
+  // 60_000) when unset. Kept raw (not parsed) at load time so importing config
+  // never throws on a malformed value during offline tests — those inject tiny
+  // timeout values straight into createServer(deps) and never read process env.
+  //   - SERVICE_HEADERS_TIMEOUT_MS bounds time to receive request headers.
+  //   - SERVICE_REQUEST_TIMEOUT_MS bounds time to receive the ENTIRE request
+  //     (headers + body); it also bounds the oversized-body drain-to-EOF.
+  //   - SERVICE_SSE_IDLE_TIMEOUT_MS caps an idle chat stream (no token emitted)
+  //     before the turn is aborted and a redacted error event ends the stream.
+  serviceHeadersTimeoutMs: process.env.SERVICE_HEADERS_TIMEOUT_MS?.trim() || undefined,
+  serviceRequestTimeoutMs: process.env.SERVICE_REQUEST_TIMEOUT_MS?.trim() || undefined,
+  serviceSseIdleTimeoutMs: process.env.SERVICE_SSE_IDLE_TIMEOUT_MS?.trim() || undefined,
 };

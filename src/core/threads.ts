@@ -6,6 +6,13 @@ import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
 // only via SqliteSaver in memory.ts" convention (and the 4b/4c single-factory
 // guards) is unaffected — this module never opens a connection.
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
+// Phase 5 (5e): app-owned schema versioning + forward-migration runner. The
+// `threads` table + owner index are created by APP_MIGRATIONS (migration 1),
+// NOT by an inline CREATE-IF-NOT-EXISTS, so the app schema evolves through a
+// versioned, transactional, forward-only runner. This manages ONLY app tables;
+// the library's checkpoint tables remain the library's responsibility (see
+// ensureCheckpointTables below and the version-pin coupling guard).
+import { APP_MIGRATIONS, runMigrations } from "./migrations.js";
 
 // Phase 5 (5b): thread identity & ownership MODEL with enforcement.
 //
@@ -62,6 +69,24 @@ export interface ThreadStore {
   // Returns true if a thread was deleted, false if not found / not owned. A
   // non-owner delete changes NOTHING (neither the ownership row nor checkpoints).
   deleteThread(ownerId: string, threadId: string): boolean;
+  // Phase 5 (5d): RETENTION policy HOOK (not a scheduler). Hard-delete every
+  // thread whose `updatedAt` is strictly older than `policy.olderThanEpochMs`,
+  // reusing the SAME atomic ownership-row + checkpoint-state delete semantics as
+  // deleteThread (no orphaned checkpoints/writes). When `policy.ownerId` is set,
+  // only that owner's threads are considered (owner-scoped purge); when omitted,
+  // all owners' expired threads are pruned (operator/global purge). Returns the
+  // number of threads deleted. This is a CALLABLE hook — scheduling and the
+  // operational purge cadence are a Phase 10 concern, deliberately out of scope.
+  pruneThreads(policy: RetentionPolicy): number;
+}
+
+// Input to the retention hook. `olderThanEpochMs` is an absolute epoch-ms cutoff
+// (a thread is pruned when updatedAt < cutoff); callers compute it from a
+// retention window (e.g. Date.now() - retentionMs). `ownerId`, when present,
+// scopes the purge to a single owner.
+export interface RetentionPolicy {
+  olderThanEpochMs: number;
+  ownerId?: string;
 }
 
 // The concrete better-sqlite3 Database type, sourced from @types/better-sqlite3
@@ -73,29 +98,10 @@ export interface ThreadStore {
 type Db = BetterSqlite3Database;
 
 // Dedicated ownership table. Name chosen to NOT collide with the library's
-// `checkpoints` / `writes` tables (which live in the same file).
+// `checkpoints` / `writes` tables (which live in the same file). The table (and
+// its owner index) are created by APP_MIGRATIONS migration 1 via runMigrations
+// at store construction; this constant is used by the prepared statements below.
 const THREADS_TABLE = "threads";
-
-// Idempotent schema setup. Safe to call repeatedly (CREATE ... IF NOT EXISTS).
-// Runs in a transaction so a fresh file gets both the table and its index
-// atomically.
-function setupThreadsSchema(db: Db): void {
-  db.transaction(() => {
-    db.exec(`
-CREATE TABLE IF NOT EXISTS ${THREADS_TABLE} (
-  id TEXT PRIMARY KEY,
-  owner_id TEXT NOT NULL,
-  title TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);`);
-    // Index supports list-by-owner (and ownership-scoped lookups). Named to
-    // avoid collisions with any library indexes.
-    db.exec(`
-CREATE INDEX IF NOT EXISTS idx_threads_owner_id
-  ON ${THREADS_TABLE} (owner_id, updated_at DESC);`);
-  })();
-}
 
 // Shape of a raw row as returned by better-sqlite3 for the threads table.
 interface ThreadRow {
@@ -159,10 +165,15 @@ CREATE TABLE IF NOT EXISTS writes (
 //
 export function createThreadStore(saver: SqliteSaver): ThreadStore {
   const db = saver.db;
-  // Create our ownership table AND ensure the library's checkpoint tables exist
-  // (see ensureCheckpointTables) BEFORE preparing any statements — better-sqlite3
-  // compiles DELETE statements eagerly and would throw on a missing table.
-  setupThreadsSchema(db);
+  // Bring the APP-OWNED schema up to date via the versioned, forward-only
+  // migration runner (creates the `threads` table + owner index at migration 1,
+  // records the app schema version in app_schema_migrations, and fails loudly if
+  // the DB was written by a newer app). This manages ONLY app tables. We then
+  // ensure the LIBRARY-OWNED checkpoint tables exist (see ensureCheckpointTables
+  // — deliberately OUTSIDE the app migration runner) BEFORE preparing any
+  // statements, because better-sqlite3 compiles DELETE statements eagerly and
+  // would throw on a missing table.
+  runMigrations(db, APP_MIGRATIONS);
   ensureCheckpointTables(db);
 
   // Prepared statements (compiled once). All ownership-sensitive reads/writes
@@ -200,6 +211,23 @@ export function createThreadStore(saver: SqliteSaver): ThreadStore {
     `DELETE FROM checkpoints WHERE thread_id = ?`
   );
   const deleteWritesStmt = db.prepare(`DELETE FROM writes WHERE thread_id = ?`);
+
+  // Phase 5 (5d) retention: select expired threads (updatedAt strictly older than
+  // the cutoff), optionally scoped to one owner. We SELECT the (id, owner_id)
+  // pairs first, then delete each via the SAME atomic path as deleteThread so the
+  // ownership row and checkpoint state always vanish together. Typed at prepare
+  // time so .all(...) returns the id/owner rows without a cast.
+  const selectExpiredAllStmt = db.prepare<
+    [cutoff: number],
+    { id: string; owner_id: string }
+  >(`SELECT id, owner_id FROM ${THREADS_TABLE} WHERE updated_at < ?`);
+  const selectExpiredByOwnerStmt = db.prepare<
+    [cutoff: number, owner: string],
+    { id: string; owner_id: string }
+  >(
+    `SELECT id, owner_id FROM ${THREADS_TABLE}
+      WHERE updated_at < ? AND owner_id = ?`
+  );
 
   return {
     createThread(ownerId, opts) {
@@ -264,6 +292,32 @@ export function createThreadStore(saver: SqliteSaver): ThreadStore {
         deleteCheckpointsStmt.run(threadId);
         deleteWritesStmt.run(threadId);
         return true;
+      })();
+      return deleted;
+    },
+
+    pruneThreads(policy) {
+      const { olderThanEpochMs, ownerId } = policy;
+      // Prune the whole matched set in ONE transaction so a batch purge is
+      // all-or-nothing and each thread's ownership row + checkpoint state are
+      // removed together (no orphaned checkpoints/writes). Reuses the same
+      // prepared DELETE statements as deleteThread — the ownership row is deleted
+      // with its OWNER in the predicate, so an owner-scoped prune can never touch
+      // another owner's thread even if a stale id were somehow reused.
+      const deleted = db.transaction(() => {
+        const rows =
+          ownerId === undefined
+            ? selectExpiredAllStmt.all(olderThanEpochMs)
+            : selectExpiredByOwnerStmt.all(olderThanEpochMs, ownerId);
+        let count = 0;
+        for (const { id, owner_id } of rows) {
+          const info = deleteOwnedThreadStmt.run(owner_id, id);
+          if (info.changes === 0) continue;
+          deleteCheckpointsStmt.run(id);
+          deleteWritesStmt.run(id);
+          count += 1;
+        }
+        return count;
       })();
       return deleted;
     },

@@ -40,6 +40,64 @@ export const MAX_BODY_BYTES = 64 * 1024; // 64 KiB
 // prompt independently of the raw-body byte cap.
 export const MAX_MESSAGE_CHARS = 8_000;
 
+// Phase 5 (5d / R1): server hardening timeouts (milliseconds). These bound
+// slow-client / slowloris behavior and idle SSE connections. They are INJECTABLE
+// via ServerDeps.timeouts so tests can drive the timeout paths with tiny,
+// deterministic values (no real 10s/30s/60s wall-clock waits); production wires
+// them from env (see src/run-server.ts) and unset values fall back to the
+// approved defaults below.
+export interface ServerTimeouts {
+  // http.Server.headersTimeout — max time to receive the request HEADERS.
+  headersTimeoutMs: number;
+  // http.Server.requestTimeout — max time to receive the ENTIRE request
+  // (headers + body). This ALSO bounds the oversized-body drain-to-EOF (R4): a
+  // slow client cannot hold a connection open past this even while we drain a
+  // 413'd upload, because Node enforces requestTimeout independently of the
+  // handler and destroys the socket when it elapses.
+  requestTimeoutMs: number;
+  // Max idle time on a chat SSE stream with NO token emitted before we abort the
+  // in-flight turn, emit a redacted `error` event, and end the stream cleanly.
+  // Reset on every emitted token; armed once streaming begins. Bounds a stalled
+  // provider turn and an idle keep-alive SSE connection.
+  sseIdleTimeoutMs: number;
+}
+
+// Approved 5d defaults. Applied when a field is omitted from ServerDeps.timeouts.
+export const DEFAULT_TIMEOUTS: ServerTimeouts = {
+  headersTimeoutMs: 10_000,
+  requestTimeoutMs: 30_000,
+  sseIdleTimeoutMs: 60_000,
+};
+
+// Merge a partial timeout override onto the approved defaults.
+export function resolveTimeouts(partial?: Partial<ServerTimeouts>): ServerTimeouts {
+  return { ...DEFAULT_TIMEOUTS, ...partial };
+}
+
+// Parse a POSITIVE integer millisecond timeout from a raw env value, falling
+// back to `fallback` when unset/empty. Rejects 0 as well as negatives and
+// non-integers: Node treats a headersTimeout/requestTimeout of 0 as "no
+// timeout" and a 0 SSE idle timeout fires immediately, so 0 would SILENTLY
+// DISABLE the hardening — the opposite of the intent. We fail loudly instead.
+// (An explicit opt-out is deliberately out of scope; if ever wanted it must be
+// added as its own sentinel, never via a bare 0.) Lives here next to
+// DEFAULT_TIMEOUTS/resolveTimeouts so the timeout config path is unit-testable
+// offline; src/run-server.ts wires the env values through it.
+export function parseTimeoutMs(
+  raw: string | undefined,
+  name: string,
+  fallback: number
+): number {
+  if (!raw) return fallback;
+  const ms = Number(raw);
+  if (!Number.isInteger(ms) || ms <= 0) {
+    throw new Error(
+      `Invalid ${name} "${raw}". Must be a positive integer (milliseconds).`
+    );
+  }
+  return ms;
+}
+
 // The streaming graph the chat handler drives. Structurally the compiled
 // LangGraph returned by createConversationalChain; kept as a minimal shape so
 // tests can inject a fake with the same `.stream(...)` contract.
@@ -68,6 +126,9 @@ export interface ServerDeps {
   // console.error sink. Whatever is passed, the server only ever hands it
   // ALREADY-REDACTED strings.
   log?: (line: string) => void;
+  // Optional 5d hardening timeouts. Omitted fields fall back to DEFAULT_TIMEOUTS.
+  // Tests inject tiny values to drive the timeout paths deterministically.
+  timeouts?: Partial<ServerTimeouts>;
 }
 
 // A tiny structured result for the JSON (non-SSE) handlers, so routing stays
@@ -95,6 +156,24 @@ type BodyResult =
   | { ok: true; value: unknown }
   | { ok: false; status: 400 | 413 };
 
+// Top-level keys rejected by the R3 prototype-pollution guard. These are the
+// three names that, if ever merged/assigned into another object, could mutate a
+// prototype. We reject at the parse boundary (a generic 400) as defense-in-depth.
+const FORBIDDEN_TOP_LEVEL_KEYS = ["__proto__", "constructor", "prototype"] as const;
+
+// True if `value` is a non-null object carrying any forbidden key as an OWN
+// property. Uses Object.prototype.hasOwnProperty via .call so a body that itself
+// defines a `hasOwnProperty` field cannot subvert the check, and so INHERITED
+// members (every object inherits `constructor`) are NOT flagged — only own keys
+// actually present in the JSON are.
+function hasForbiddenTopLevelKey(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  for (const key of FORBIDDEN_TOP_LEVEL_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) return true;
+  }
+  return false;
+}
+
 function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
@@ -119,6 +198,12 @@ function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
         // 413 response could be flushed, so the client would see a socket error
         // instead of a clean 413. Resolving on 'end' (below) lets the handler
         // write a proper 413 after the client finishes (or the stream ends).
+        //
+        // R4: the drain is TIME-BOUNDED by http.Server.requestTimeout (set in
+        // createServer from ServerTimeouts.requestTimeoutMs). A slow client that
+        // never sends EOF cannot hold this connection open indefinitely — Node
+        // enforces requestTimeout and destroys the socket, so the drain path is
+        // bounded without us having to destroy (and lose the clean 413) here.
         overflowed = true;
         chunks.length = 0;
         return;
@@ -137,11 +222,29 @@ function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
         finish({ ok: true, value: undefined });
         return;
       }
+      let parsed: unknown;
       try {
-        finish({ ok: true, value: JSON.parse(raw) });
+        parsed = JSON.parse(raw);
       } catch {
         finish({ ok: false, status: 400 });
+        return;
       }
+      // R3 (prototype-pollution hardening, defense-in-depth): reject a body whose
+      // TOP-LEVEL keys include a prototype-pollution vector.
+      //
+      // INVARIANT: handlers read ONLY explicitly named fields off the parsed
+      // body (extractOptionalTitle/extractChatMessage) and NEVER merge or
+      // Object.assign the raw body into another object, so this is not currently
+      // exploitable. This guard is belt-and-suspenders so a future handler cannot
+      // accidentally introduce a pollution sink. (Note JSON.parse itself is
+      // already safe: it materializes `__proto__` as an OWN data property rather
+      // than walking/[[Set]]ing the prototype chain — hence Object.prototype is
+      // never polluted — but we still reject such bodies rather than pass them on.)
+      if (hasForbiddenTopLevelKey(parsed)) {
+        finish({ ok: false, status: 400 });
+        return;
+      }
+      finish({ ok: true, value: parsed });
     });
 
     req.on("error", () => {
@@ -431,11 +534,53 @@ async function handleChat(
   req.on("close", onClose);
   res.on("close", onClose);
 
+  const timeouts = resolveTimeouts(deps.timeouts);
   const sse = new SseWriter(res);
   let accumulated = "";
+
+  // R1: idle-stream watchdog. If no token is emitted within sseIdleTimeoutMs we
+  // abort the in-flight turn, emit a REDACTED error event, and end the stream
+  // cleanly. The timer is armed once streaming begins and RESET on every emitted
+  // token, so an actively-streaming turn is never cut off; only a stalled/idle
+  // turn is. `timedOut` steers the completion/catch logic so we never double-send
+  // a done/error (SseWriter also guards against write-after-close).
+  let timedOut = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearIdleTimer = (): void => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
+  const armIdleTimer = (): void => {
+    // Never (re-)arm after the watchdog has already fired: the stream is being
+    // torn down, so a late buffered chunk must not resurrect the timer (which
+    // could fire a second, spurious idle-timeout log/abort). Defense-in-depth
+    // alongside the `!timedOut` guard on the token branch below.
+    if (timedOut) return;
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      timedOut = true;
+      // Abort the in-flight run first (cancels the graph / provider work), then
+      // emit a redacted error and close. SseWriter guards writes after close, so
+      // a late token or the catch block below cannot produce a second frame.
+      controller.abort();
+      const reason = redactError(new Error("chat turn timed out"));
+      log(`[server] chat turn idle-timed-out after ${timeouts.sseIdleTimeoutMs}ms`);
+      sse.error(reason);
+      sse.end();
+    }, timeouts.sseIdleTimeoutMs);
+    // The watchdog must not, by itself, keep the process alive.
+    idleTimer.unref?.();
+  };
+
   try {
     // Emit the versioned init marker (also flushes SSE headers).
     sse.init(threadId);
+
+    // Arm the idle watchdog now — BEFORE awaiting the stream — so a stall during
+    // stream setup (no first token) is also bounded, not just gaps between tokens.
+    armIdleTimer();
 
     // Drive the graph with streamMode "messages" (same contract as the REPL),
     // but translate chunks into the versioned SSE token events.
@@ -451,42 +596,65 @@ async function handleChat(
 
     for await (const [chunk] of stream) {
       const piece = extractChunkText(chunk.content);
-      if (piece.length > 0) {
+      // Once the idle watchdog has fired we stop processing chunks entirely: no
+      // token is written (SseWriter would no-op anyway) and, crucially, the timer
+      // is NOT re-armed. A graph that emits one more buffered chunk before it
+      // honors the abort therefore cannot produce a second idle-timeout.
+      if (piece.length > 0 && !timedOut) {
         accumulated += piece;
         sse.token(piece);
+        // Progress made: reset the idle watchdog.
+        armIdleTimer();
       }
     }
 
-    // The turn succeeded: emit `done` and close the stream FIRST, so the client
-    // receives the completed reply promptly and the response is fully finalized.
-    sse.done(accumulated);
-    sse.end();
+    clearIdleTimer();
 
-    // Touch the thread so listThreads ordering reflects recent activity. This is
-    // pure post-turn bookkeeping (updates updatedAt for list ordering) and must
-    // be genuinely BEST EFFORT: it runs AFTER the response is already complete
-    // and is wrapped in its own try/catch, so a touch failure (e.g. a DB error)
-    // can NEVER turn a successful turn into a spurious error event or suppress
-    // the `done` event. Any failure is logged through the redacted logger.
-    try {
-      deps.store.touchThread(ownerId, threadId);
-    } catch (touchErr) {
-      log(`[server] touchThread failed after successful turn: ${redactError(touchErr)}`);
+    // If the idle watchdog already fired, it has emitted the redacted error and
+    // ended the stream — do NOT also emit `done`. Just ensure the response is
+    // closed (idempotent).
+    if (timedOut) {
+      sse.end();
+    } else {
+      // The turn succeeded: emit `done` and close the stream FIRST, so the client
+      // receives the completed reply promptly and the response is fully finalized.
+      sse.done(accumulated);
+      sse.end();
+
+      // Touch the thread so listThreads ordering reflects recent activity. This is
+      // pure post-turn bookkeeping (updates updatedAt for list ordering) and must
+      // be genuinely BEST EFFORT: it runs AFTER the response is already complete
+      // and is wrapped in its own try/catch, so a touch failure (e.g. a DB error)
+      // can NEVER turn a successful turn into a spurious error event or suppress
+      // the `done` event. Any failure is logged through the redacted logger.
+      try {
+        deps.store.touchThread(ownerId, threadId);
+      } catch (touchErr) {
+        log(`[server] touchThread failed after successful turn: ${redactError(touchErr)}`);
+      }
     }
   } catch (err) {
-    // A client-initiated abort is NOT a server error: the socket is gone, so
-    // just stop. Any real mid-stream failure becomes a REDACTED error event so
-    // provider secrets/PII never reach the wire or the logs.
-    if (controller.signal.aborted) {
+    clearIdleTimer();
+    // The idle watchdog path already emitted a redacted error + ended the stream;
+    // an abort it triggered surfaces here as a rejected stream — just ensure the
+    // response is closed without a second frame.
+    if (timedOut) {
+      sse.end();
+    } else if (controller.signal.aborted) {
+      // A client-initiated abort is NOT a server error: the socket is gone, so
+      // just stop.
       log("[server] chat turn aborted by client disconnect");
       sse.end();
     } else {
+      // Any real mid-stream failure becomes a REDACTED error event so provider
+      // secrets/PII never reach the wire or the logs.
       const reason = redactError(err);
       log(`[server] chat turn failed: ${reason}`);
       sse.error(reason);
       sse.end();
     }
   } finally {
+    clearIdleTimer();
     req.removeListener("close", onClose);
     res.removeListener("close", onClose);
   }
@@ -508,6 +676,17 @@ function extractChatMessage(body: unknown): string | null {
 // Build (but do NOT start) an http.Server wired to the request handler. The
 // caller (src/run-server.ts, or a test) calls `.listen(port, host)`. Kept
 // separate from binding so the network side effect is never triggered by import.
+//
+// R1: the server-level slow-client timeouts are applied here on the real
+// http.Server (headersTimeout / requestTimeout), from the resolved ServerDeps
+// timeouts. They are Node-enforced independently of the request handler, so they
+// bound slow-header and slow/oversized-body clients (the latter also bounds the
+// 413 drain-to-EOF, R4). The SSE idle timeout is applied per-request in the chat
+// handler.
 export function createServer(deps: ServerDeps): Server {
-  return createHttpServer(createRequestHandler(deps));
+  const server = createHttpServer(createRequestHandler(deps));
+  const timeouts = resolveTimeouts(deps.timeouts);
+  server.headersTimeout = timeouts.headersTimeoutMs;
+  server.requestTimeout = timeouts.requestTimeoutMs;
+  return server;
 }

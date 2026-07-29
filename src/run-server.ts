@@ -2,7 +2,7 @@ import { createConversationalChain } from "./core/chain.js";
 import { getSqliteSaver } from "./core/memory.js";
 import { createThreadStore } from "./core/threads.js";
 import { createTokenAuthenticator, parseAuthTokens } from "./core/auth.js";
-import { createServer, type StreamingChat } from "./core/server.js";
+import { createServer, DEFAULT_TIMEOUTS, parseTimeoutMs, type StreamingChat } from "./core/server.js";
 import { config } from "./config.js";
 import { redactError } from "./core/redaction.js";
 
@@ -34,6 +34,10 @@ function parsePort(raw: string | undefined): number {
   return port;
 }
 
+// Parse a POSITIVE integer millisecond timeout from env, falling back to the
+// approved default when unset. The parser (with its reject-0 rule) lives in
+// src/core/server.ts so it is unit-testable offline without importing this
+// listening entrypoint.
 function main(): void {
   const authTokens = parseAuthTokens(config.authTokensRaw);
   if (Object.keys(authTokens).length === 0) {
@@ -50,6 +54,25 @@ function main(): void {
   const saver = getSqliteSaver();
   const store = createThreadStore(saver);
 
+  // R1 hardening timeouts from env, with the approved 5d defaults when unset.
+  const timeouts = {
+    headersTimeoutMs: parseTimeoutMs(
+      config.serviceHeadersTimeoutMs,
+      "SERVICE_HEADERS_TIMEOUT_MS",
+      DEFAULT_TIMEOUTS.headersTimeoutMs
+    ),
+    requestTimeoutMs: parseTimeoutMs(
+      config.serviceRequestTimeoutMs,
+      "SERVICE_REQUEST_TIMEOUT_MS",
+      DEFAULT_TIMEOUTS.requestTimeoutMs
+    ),
+    sseIdleTimeoutMs: parseTimeoutMs(
+      config.serviceSseIdleTimeoutMs,
+      "SERVICE_SSE_IDLE_TIMEOUT_MS",
+      DEFAULT_TIMEOUTS.sseIdleTimeoutMs
+    ),
+  };
+
   const server = createServer({
     store,
     auth,
@@ -57,6 +80,7 @@ function main(): void {
       // For 5c the graph is constructed with streaming: true so streamMode
       // "messages" yields incremental token chunks.
       createConversationalChain({ streaming: true }, saver) as StreamingChat,
+    timeouts,
   });
 
   const port = parsePort(config.servicePort);
