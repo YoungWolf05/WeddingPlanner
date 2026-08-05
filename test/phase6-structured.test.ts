@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { z } from "zod";
 
 // Phase 6 (increment 6a) — structured-output helper.
 //
@@ -137,6 +138,74 @@ describe("Phase 6 — generateStructured (validated typed result)", () => {
     // Cleaner reason from issue messages — NOT the raw zod JSON blob.
     expect(message).toContain("must be > 0");
     expect(message).not.toContain("[{");
+  });
+
+  it("throws a NAMED refusal error when the model returns null (no structured output)", async () => {
+    control.next = null;
+    let message = "";
+    try {
+      await generateStructured(budgetPlanSchema, "plan a budget");
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toMatch(/refused or returned no structured output/i);
+    // DISTINCT from the schema-validation and transport messages.
+    expect(message).not.toMatch(/failed schema validation/i);
+    expect(message).not.toMatch(/Structured generation failed/i);
+  });
+
+  it("throws the refusal error for undefined (no structured output)", async () => {
+    control.next = undefined;
+    await expect(
+      generateStructured(budgetPlanSchema, "plan a budget")
+    ).rejects.toThrow(/refused or returned no structured output/i);
+  });
+
+  it("throws the refusal error for an empty object (nothing populated)", async () => {
+    // {} is a refusal for the budget schema because it FAILS the required-field
+    // validation (total + categories). This behavior is unchanged by the N1
+    // hardening — the empty-object refusal branch now only applies when {} is
+    // NOT schema-valid, and budgetPlanSchema requires fields so {} never is.
+    control.next = {};
+    await expect(
+      generateStructured(budgetPlanSchema, "plan a budget")
+    ).rejects.toThrow(/refused or returned no structured output/i);
+  });
+
+  it("throws the refusal error for an empty object against the checklist schema too", async () => {
+    // planningChecklistSchema requires items, so {} fails validation and stays a
+    // refusal for this existing caller as well.
+    control.next = {};
+    await expect(
+      generateStructured(planningChecklistSchema, "make a checklist")
+    ).rejects.toThrow(/refused or returned no structured output/i);
+  });
+
+  it("N1 hardening: an all-optional schema returning {} yields the VALID empty object, NOT a refusal", async () => {
+    // A GENERIC caller whose schema legitimately permits {} (all fields
+    // optional) must get the empty object back as a typed result — the
+    // empty-object refusal branch must not misclassify a schema-valid {}.
+    const allOptional = z.object({ note: z.string().optional() });
+    control.next = {};
+    const result = await generateStructured(allOptional, "anything");
+    expect(result).toEqual({});
+    // Distinct from every failure path: no throw occurred.
+  });
+
+  it("throws the refusal error for an OpenAI-style {refusal} payload", async () => {
+    control.next = { refusal: "I can't help with that." };
+    await expect(
+      generateStructured(budgetPlanSchema, "plan a budget")
+    ).rejects.toThrow(/refused or returned no structured output/i);
+  });
+
+  it("refusal is DISTINCT from a schema-validation failure (a non-empty invalid object still validates)", async () => {
+    // A non-empty object that is merely INVALID must remain a schema-validation
+    // failure — NOT reclassified as a refusal.
+    control.next = { total: -5, categories: [{ name: "Venue", amount: 1 }] };
+    await expect(
+      generateStructured(budgetPlanSchema, "plan a budget")
+    ).rejects.toThrow(/failed schema validation/i);
   });
 
   it("does NOT hard-fail a slightly over-allocated budget (generation path uses the plain schema)", async () => {

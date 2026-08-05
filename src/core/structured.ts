@@ -93,6 +93,46 @@ function toMessages(
   return messages;
 }
 
+// Shared message for the REFUSAL / no-output failure path (see generateStructured
+// contract). A fixed, content-free template, so it is inherently redaction-safe.
+const REFUSAL_MESSAGE =
+  "Structured generation refused or returned no structured output";
+
+// True for a model response that is a refusal / no-output REGARDLESS of the
+// target schema, so it is classified as refusal BEFORE schema validation runs:
+//   - null / undefined                 (no structured output came back at all)
+//   - an OpenAI-style refusal payload   ({ refusal: <truthy> } — the model
+//                                        explicitly declined)
+// These can never be a legitimately-valid structured result. A non-object
+// primitive (string/number/etc.) is NOT a refusal here; it falls through to
+// schema validation, which rejects it with a precise per-field reason. An empty
+// object ({}) is handled SEPARATELY (see isEmptyObject): it is only a refusal
+// when it also fails validation, so a schema that legitimately permits {} is not
+// misclassified.
+function isUnconditionalRefusal(raw: unknown): boolean {
+  if (raw === null || raw === undefined) return true;
+  if (typeof raw !== "object") return false;
+  const obj = raw as Record<string, unknown>;
+  return (
+    "refusal" in obj &&
+    obj["refusal"] !== undefined &&
+    obj["refusal"] !== null &&
+    obj["refusal"] !== false
+  );
+}
+
+// True for a non-null object with ZERO own enumerable keys ({}). An empty object
+// is treated as a refusal / no-output ONLY when it also FAILS schema validation
+// (nothing was populated to validate); a schema that legitimately permits {}
+// PASSES validation first and returns the empty object. See generateStructured.
+function isEmptyObject(raw: unknown): boolean {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    Object.keys(raw as Record<string, unknown>).length === 0
+  );
+}
+
 // Generate a VALIDATED, typed artifact from the LLM for an arbitrary Zod schema.
 //
 // Contract:
@@ -105,9 +145,22 @@ function toMessages(
 //     explicit `schema.safeParse`, so the value this function returns is
 //     guaranteed to satisfy the schema at runtime AND is correctly typed as
 //     z.infer<schema>. This guards against any provider/library drift.
-//   - On a model/transport failure OR a schema-validation failure, a clear Error
-//     is thrown whose message is passed through the shared redaction layer
-//     (src/core/redaction.ts) so no secret/PII can leak into logs or clients.
+//   - THREE DISTINCT, NAMED failure paths, each with a clear, redacted message:
+//       1. TRANSPORT error   — the invoke() call itself threw (network/auth/
+//          provider). Message: "Structured generation failed: …".
+//       2. REFUSAL / no output — the model declined or returned nothing usable:
+//          null/undefined, an OpenAI-style {refusal} payload, OR an empty object
+//          {} THAT IS NOT SCHEMA-VALID. This is a first-class case, DISTINCT from
+//          a schema failure. Message: "Structured generation refused or returned
+//          no structured output". NOTE the precondition: an empty object is only
+//          treated as refusal when it FAILS validation — a schema that
+//          legitimately permits {} (e.g. all-optional fields) validates first and
+//          the empty object is returned as the typed result.
+//       3. SCHEMA-VALIDATION failure — a NON-EMPTY object came back but does not
+//          satisfy the schema. Message: "Structured output failed schema
+//          validation: …".
+//     All three pass through the shared redaction layer (src/core/redaction.ts)
+//     so no secret/PII can leak into logs or clients.
 export async function generateStructured<T>(
   schema: z.ZodType<T>,
   input: string | BaseMessage[],
@@ -129,8 +182,23 @@ export async function generateStructured<T>(
     );
   }
 
+  // REFUSAL / no-output that is independent of the schema (null/undefined or an
+  // OpenAI-style {refusal} payload) is checked BEFORE schema validation: there
+  // is no candidate object to validate, so a "schema validation" message would
+  // be misleading.
+  if (isUnconditionalRefusal(raw)) {
+    throw new Error(REFUSAL_MESSAGE);
+  }
+
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
+    // An EMPTY object that fails validation is a refusal / no-output, NOT a
+    // schema-validation failure: nothing was populated to validate. (A schema
+    // that legitimately permits {} would have PASSED above and returned it, so
+    // this branch is only reached for a schema that actually requires fields.)
+    if (isEmptyObject(raw)) {
+      throw new Error(REFUSAL_MESSAGE);
+    }
     // In zod v4 `error.message` is a verbose JSON-serialized issue array; build
     // a concise reason from the per-issue messages instead. Redact it before it
     // reaches any log/client — issue messages can echo offending model values

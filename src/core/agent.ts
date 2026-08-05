@@ -35,6 +35,22 @@ import { weddingTools } from "./tools.js";
 //      temperature on its tool/structured path and errors when one is sent).
 //      The decision reuses the SHARED predicate `isTemperatureOmitModel` from
 //      structured.ts, so the "opus => omit temperature" rule lives in ONE place.
+//
+// TYPED EVENT CONTRACT (Phase 6 exit criterion 3 — "tool state/errors are
+// represented in the typed event contract"): for Phase 6 the "typed event
+// contract" IS the agent's typed LangGraph message stream, and it genuinely
+// represents tool state and errors:
+//   - a tool INTENTION appears as an `AIMessage` carrying `tool_calls` (each
+//     with the tool `name` + parsed `args`);
+//   - a tool RESULT appears as a `ToolMessage` (its `content` / `artifact`);
+//   - a tool ERROR appears as a `ToolMessage` with `status: "error"` — this is
+//     also exactly how an UNPERMITTED (unknown) tool name is handled: the
+//     prebuilt `ToolNode` refuses it with an error `ToolMessage` and NEVER
+//     executes anything outside `weddingTools`.
+// Only the two SAFE `weddingTools` are ever bound/executable. Wiring this agent
+// (and its tool events) into the HTTP SSE event contract (src/core/sse.ts) is
+// DEFERRED to a later phase; Phase 6 satisfies the criterion at the agent
+// message-contract level, proven offline in test/phase6-agent-contract.test.ts.
 
 // Default agent model. claude-sonnet-4-6 is fully supported and works well for
 // tool calling whether or not a temperature is sent, so it is the safe default

@@ -33,6 +33,7 @@ npm run build                    # compile to dist/
 # LIVE / opt-in — make real, credentialed LiteLLM calls. NOT part of npm test or CI:
 npm run test:connection          # verify LiteLLM reachability — run first after setup
 npm run test:capabilities        # probe the chat/embedding capability matrix -> docs/capabilities/<date>.md
+npm run test:contracts           # Phase 6 (6d) probe per-alias tool-call + structured-output contract -> docs/contracts/<date>.md
 npm run eval                     # run the wedding-planning eval dataset -> docs/eval/<date>.md
 npm run serve                    # LIVE local durable conversation service (Phase 5); binds SERVICE_PORT on 127.0.0.1
 ```
@@ -47,9 +48,15 @@ entrypoint is never imported by the suite.
 
 `npm test` is fully OFFLINE and CI-safe: the model boundary (`createChatModel`)
 is mocked per test, so no credentials or network are used. `test:connection`,
-`test:capabilities`, and `eval` are LIVE, opt-in commands that call the real
-proxy and are never run by `npm test` or CI. `typecheck` and `build` provide
-compilation checks.
+`test:capabilities`, `test:contracts`, and `eval` are LIVE, opt-in commands that
+call the real proxy and are never run by `npm test` or CI. `typecheck` and
+`build` provide compilation checks.
+
+> **Local `serve` DB hygiene.** `npm run serve` with the DEFAULT
+> `CHECKPOINT_DB_PATH` writes `./data/checkpoints.sqlite` INSIDE the repo. It is
+> gitignored, but a stray `./data` directory will trip offline repo-cleanliness
+> guards. For local runs, point `CHECKPOINT_DB_PATH` OUTSIDE the repo (e.g. a
+> temp dir). The OFFLINE suite never creates `./data`.
 
 ## Architecture
 
@@ -75,12 +82,21 @@ src/
     tracing.ts         # Phase 4 (4d) local tracing at the createChatModel() boundary (opt-in, redacted)
     capabilities.ts    # Phase 4 (4c) pure capability-matrix rendering + abort classification
     eval.ts            # Phase 4 (4e) pure eval dataset parsing, property scorers, aggregation + rendering
+    schemas.ts         # Phase 6 (6a) typed wedding-domain Zod schemas (BudgetPlan/PlanningChecklist) +
+                       #   validateBudgetAllocation/budgetPlanStrictSchema (cross-field rule kept OFF the LLM path)
+    structured.ts      # Phase 6 (6a) structured output: generateStructured/generateBudgetPlan (withStructuredOutput),
+                       #   decideStructuredModelOptions + isTemperatureOmitModel (opus temp-omit); refusal/schema/transport paths
+    tools.ts           # Phase 6 (6b) SAFE pure read-only tools days_until/split_budget + tool() wrappers + weddingTools registry
+    tool-runtime.ts    # Phase 6 (6d) bounded tool-execution timeout: withToolTimeout/invokeToolWithTimeout + ToolTimeoutError
+    agent.ts           # Phase 6 (6c) tool-loop agent via createReactAgent + weddingTools + Aria persona (createWeddingAgent/runWeddingAgent)
+    contracts.ts       # Phase 6 (6d) pure tool-call + structured-output contract matrix rendering/classification
   run-chain.ts         # CLI entrypoint for Phase 1
   run-memory.ts        # CLI entrypoint for Phase 2
   cli.ts               # Phase 3 streaming terminal REPL and conversation controls
   run-server.ts        # Phase 5 LIVE `npm run serve` entrypoint (binds SERVICE_PORT; NOT imported by tests)
   test-connection.ts   # LIVE smoke test (routed through createChatModel)
   probe-capabilities.ts# LIVE, opt-in capability probe -> docs/capabilities/<date>.md
+  probe-contracts.ts   # Phase 6 (6d) LIVE, opt-in tool-call + structured-output contract probe -> docs/contracts/<date>.md
   run-eval.ts          # LIVE, opt-in eval runner -> docs/eval/<date>.md
 evals/
   dataset.jsonl        # versioned wedding-planning eval prompts + deterministic expectations
@@ -88,9 +104,53 @@ evals/
 
 The offline Vitest suite lives under `test/` (outside `src/`, so it is never
 emitted to `dist/`). The pure modules above (`redaction.ts`, `capabilities.ts`,
-`eval.ts`, `repl.ts`) are I/O-free so the suite exercises them without a live
-call; the `probe-capabilities.ts` and `run-eval.ts` scripts own the impure,
-live-only I/O and are never imported by tests.
+`eval.ts`, `repl.ts`, `schemas.ts`, `contracts.ts`, `tool-runtime.ts`) are
+I/O-free so the suite exercises them without a live call; the
+`probe-capabilities.ts`, `probe-contracts.ts`, and `run-eval.ts` scripts own the
+impure, live-only I/O and are never imported by tests.
+
+### Structured domain data and safe tools (Phase 6) notes
+
+- **Structured output + refusal/malformed/provider handling.** `structured.ts`
+  (`generateStructured`/`generateBudgetPlan`) requests provider-native
+  structured output via `withStructuredOutput`, then RE-VALIDATES with
+  `schema.safeParse` (defense in depth). It distinguishes THREE named, redacted
+  failure paths: a TRANSPORT error (`invoke()` threw), a REFUSAL / no-output case
+  (null/undefined, an empty object, or an OpenAI-style `{refusal}` payload → a
+  distinct "refused or returned no structured output" error), and a
+  SCHEMA-VALIDATION failure (a non-empty object that fails the schema).
+- **Opus temperature-omit rule.** `claude-opus-4-8` DEPRECATES an explicit
+  temperature on its structured-output / tool paths, so structured-output AND
+  agent model construction go through the shared `isTemperatureOmitModel`
+  predicate: opus → `createChatModel({ temperature: null })` (field OMITTED),
+  sonnet/other → factory default. The default structured-output / agent model is
+  `claude-sonnet-4-6` (fully `Supported`). The `test:contracts` probe builds opus
+  with temperature omitted so its contract reading is fair.
+- **Safe tools + bounded timeout.** `tools.ts` exposes exactly two SAFE, pure,
+  read-only tools (`days_until`, `split_budget`) with Zod input schemas and no
+  I/O. They are synchronous and effectively instantaneous, so they cannot truly
+  time out; `tool-runtime.ts` (`withToolTimeout`/`invokeToolWithTimeout`,
+  `ToolTimeoutError`) is a DEFENSIVE, injectable bound (the mechanism the exit
+  criterion asks for), not a per-call SLA. `timeoutMs` is injectable so tests
+  drive the timeout path deterministically with fake timers.
+- **Typed event contract = the agent MESSAGE STREAM (SSE wiring deferred).** For
+  Phase 6, "tool state/errors are represented in the typed event contract" is
+  satisfied at the agent's typed LangGraph message stream: a tool INTENTION is an
+  `AIMessage.tool_calls` entry (name + parsed args + id), a RESULT is a
+  `ToolMessage` (content/artifact, linked by `tool_call_id`), and an ERROR is a
+  `ToolMessage` with `status: "error"`. Only the two `weddingTools` are bound and
+  executable; an unknown/unpermitted tool name is refused by the prebuilt
+  `ToolNode` with an error `ToolMessage` and NEVER executes. Wiring this agent
+  (and its tool events) into the HTTP SSE contract (`sse.ts`) and the CLI is
+  DELIBERATELY DEFERRED to a later phase; the agent is not yet reachable from
+  `npm run serve` / `npm run chat`.
+- **`createReactAgent` deprecation / future `createAgent` migration.** `agent.ts`
+  uses `createReactAgent` from `@langchain/langgraph/prebuilt`. In langgraph
+  1.4.x that SYMBOL is `@deprecated` (its JSDoc steers toward `createAgent` from
+  the `langchain` meta-package). It remains fully functional and is kept
+  INTENTIONALLY: migrating to `createAgent` would add the `langchain`
+  meta-package, a deliberate FUTURE decision. `agent.ts` already passes the
+  current, non-deprecated `prompt` option (not `messageModifier`/`stateModifier`).
 
 ### Durable conversation service (Phase 5) notes
 
@@ -157,7 +217,7 @@ import { config } from "../config"; // wrong — will fail at runtime
 
 ## Roadmap and phase governance
 
-[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 5 — Durable Conversation Service** is complete (all five Phase 5 exit criteria met with recorded evidence; increments 5a–5e delivered, reviewed, and covered by the offline suite). No phase is currently active. **Phase 6 — Structured Domain Data and Safe Tools** is the next proposed phase and is NOT active until the user approves its activation.
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 5 — Durable Conversation Service** is complete (all five Phase 5 exit criteria met with recorded evidence; increments 5a–5e delivered, reviewed, and covered by the offline suite). **Phase 6 — Structured Domain Data and Safe Tools** is user-approved and ACTIVE: increments 6a–6c are complete and 6d (hardening + contract coverage + docs) is delivered; the top-level Phase 6 exit criteria remain unticked pending the separate, user-approved manager closeout. **Phase 7** is the next proposed phase and is NOT active until the user approves its activation.
 
 Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 

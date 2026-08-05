@@ -2,7 +2,9 @@
 
 See the [canonical product roadmap](docs/roadmap.md) for phase scope, status, and governance.
 
-Latest live evidence: [capability matrices](docs/capabilities/) and [evaluation baselines](docs/eval/) (each folder's `README.md` links the most recent dated snapshot).
+Latest live evidence: [capability matrices](docs/capabilities/), [tool-call & structured-output contract matrices](docs/contracts/), and [evaluation baselines](docs/eval/) (each folder's `README.md` links the most recent dated snapshot).
+
+Phase 6 adds validated wedding-domain structured output (`BudgetPlan` / `PlanningChecklist`) and two SAFE, read-only tools (`days_until`, `split_budget`) behind a tool-loop agent. The agent is exercised offline and via the opt-in `npm run test:contracts` probe; wiring it into the CLI/HTTP service is deferred to a later phase.
 
 ## Running the conversation service
 
