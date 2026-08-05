@@ -58,6 +58,23 @@ call the real proxy and are never run by `npm test` or CI. `typecheck` and
 > guards. For local runs, point `CHECKPOINT_DB_PATH` OUTSIDE the repo (e.g. a
 > temp dir). The OFFLINE suite never creates `./data`.
 
+## Testing during development (cost-aware policy)
+
+The offline suite is deterministic and CI-safe, but running the FULL `npm test`
+on every edit is wasteful. Follow this policy (it does not contradict the
+OFFLINE/CI-safe framing above — `npm test` remains fully offline and mocked):
+
+- **While iterating** (implementing or fixing), run ONLY the affected test
+  file(s) — e.g. `npx vitest run test/<file>.test.ts` — plus `npm run typecheck`.
+  Do NOT run the full `npm test` on every step.
+- **Run the full offline suite (`npm test`) ONCE** at an increment's completion
+  gate and before a phase closeout. It is the cross-cutting regression /
+  repo-hygiene safety net that per-file runs miss (e.g. it has caught stray-DB /
+  test-isolation issues that a single file cannot surface).
+- **Documentation-only changes** do not require a full-suite run; `npm run
+  typecheck` / `npm run build` suffice.
+- Keep test output to summary lines; avoid dumping full logs.
+
 ## Architecture
 
 ```
@@ -217,7 +234,7 @@ import { config } from "../config"; // wrong — will fail at runtime
 
 ## Roadmap and phase governance
 
-[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 5 — Durable Conversation Service** is complete (all five Phase 5 exit criteria met with recorded evidence; increments 5a–5e delivered, reviewed, and covered by the offline suite). **Phase 6 — Structured Domain Data and Safe Tools** is user-approved and ACTIVE: increments 6a–6c are complete and 6d (hardening + contract coverage + docs) is delivered; the top-level Phase 6 exit criteria remain unticked pending the separate, user-approved manager closeout. **Phase 7** is the next proposed phase and is NOT active until the user approves its activation.
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 6 — Structured Domain Data and Safe Tools** is complete (all four Phase 6 exit criteria met with recorded evidence; increments 6a–6d delivered, reviewed, and covered by the offline suite). No phase is currently active. **Phase 7 — Knowledge Ingestion and Retrieval** is the next proposed phase and is NOT active until the user approves its activation.
 
 Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 
