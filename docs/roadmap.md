@@ -6,10 +6,10 @@
 | --- | --- |
 | Last reviewed | 2026-08-06 |
 | Current completed milestone | **Phase 8 — Grounded Answers and Trusted Citations** |
-| Active phase | **None** |
-| Next proposed phase | **Phase 9 — Web Interface** |
+| Active phase | **Phase 9 — Web Interface** |
+| Next proposed phase | **Phase 10 — Production Hardening and Continuous Evaluation** |
 
-Phase 8 is complete (all four exit criteria met with recorded evidence; increments 8a–8d delivered, reviewed, and covered by the offline suite) and is the last completed milestone. No phase is currently active. Phase 9 — Web Interface is the next proposed phase and is not active until the user approves its activation.
+Phase 8 remains the last completed milestone (all four exit criteria met with recorded evidence; increments 8a–8d delivered, reviewed, and covered by the offline suite). Phase 9 — Web Interface is now active (user-approved) with increment plan 9a–9d and the approved design decisions recorded below; no Phase 9 exit criteria are met yet. Phase 10 — Production Hardening and Continuous Evaluation is the next proposed phase and is not active until the user approves its activation.
 
 ## Status vocabulary
 
@@ -375,7 +375,7 @@ Phase 8 is delivered as ordered, independently verifiable sub-increments; each i
 
 ### Phase 9 — Web Interface
 
-**Status:** Planned
+**Status:** Active
 
 **Goal:** Deliver a secure browser experience over the stable service and event contracts.
 
@@ -396,7 +396,28 @@ Phase 8 is delivered as ordered, independently verifiable sub-increments; each i
 
 **Implementation evidence and notes**
 
-- No web UI or browser-facing service currently exists.
+- Phase 9 is active (user-approved); no Phase 9 exit criteria are met yet. Delivery follows increments 9a–9d, each implement → code-review → verify, one at a time. The four exit criteria above remain unticked until their evidence is recorded.
+
+**Approved design decisions (rationale for future readers)**
+
+- **Event contract:** EXTEND the existing typed SSE contract (`src/core/sse.ts`) to a VERSIONED v2 — bump `SSE_PROTOCOL_VERSION` to `2` and add typed events for CITATIONS (the Phase 8 `TrustedCitation` objects: app-owned IDs resolved FROM the store, never model text), TOOL STATE/ERRORS (the Phase 6 agent message-stream shape: `tool_calls` intention / `ToolMessage` result / `status: "error"`), and STRUCTURED ARTIFACTS — BACKWARD-COMPATIBLY: clients branch on `init.version`, and the v1 `init`/`token`/`done`/`error` shapes stay intact. Pure and offline-testable.
+- **Backend:** KEEP the existing `node:http` `createServer(deps)` + SSE (no new web framework). Wire the Phase 8 RAG and the Phase 6 agent through the existing `StreamingChat` / `ServerDeps` seam (`src/core/server.ts`). Minimal new dependencies.
+- **Frontend stack:** a REACT + VITE single-page app (React chosen over vanilla-TS for richer citation/tool/artifact rendering); a THIN client over the stable typed v2 contract.
+- **Credentials:** server-side credential handling ONLY — LiteLLM credentials NEVER reach the browser. The React/Vite browser bundle must contain ZERO provider credentials (no `apiKey`/`baseURL`); this is a HARD, TESTED guardrail (a build/bundle check asserting no secret leaks into client assets), directly serving exit criterion 1.
+- **Auth model:** UNCHANGED from Phase 5 — bearer token → `ownerId` (`src/core/auth.ts`); the browser sends the bearer token; the `ownerId` for every thread operation comes ONLY from the authenticated token, NEVER from `thread_id` or any client-supplied field. `thread_id` remains a server-issued conversation key, not identity or authorization.
+- **End-to-end tooling:** PLAYWRIGHT browser end-to-end tests, run as an OPT-IN / CI-gated suite SEPARATE from the offline `npm test` (like the live evals/probes) so `npm test` stays fast and fully offline; covering primary journeys, recovery paths (cancel/retry/reconnect), and unauthorized-access attempts.
+- **Quality gate:** the browser E2E suite is the exit-criterion-4 evidence; no new model/eval baseline is introduced (the Phase 8 RAG baseline is already ratified).
+
+**Increment plan (9a–9d)**
+
+Phase 9 is delivered as ordered, independently verifiable sub-increments; each is delivered as implement → code-review → verify. One sub-increment is worked at a time.
+
+- **9a — Event contract v2 (typed).** Extend `src/core/sse.ts` to `SSE_PROTOCOL_VERSION` `2` with typed citation / tool-state / artifact events, backward-compatible (client branches on `init.version`; the v1 `init`/`token`/`done`/`error` shapes are preserved). Pure and offline-tested. Targets exit criterion 3 (foundation) and underpins exit criterion 2 (versioned contract).
+- **9b — Server RAG/agent wiring.** Wire the Phase 8 `answerQuestion` (grounded answers + trusted citations + `evidenceStatus`) and the Phase 6 agent tool-loop into the server's `StreamingChat` seam, emitting v2 events; auth/ownership enforcement unchanged from Phase 5 (`ownerId` from the bearer token only). Offline-tested via injected deps + a mocked model. Targets exit criteria 1, 2, 3.
+- **9c — React+Vite browser frontend.** A minimal, secure SPA — bearer-token auth, thread create/resume, streaming render, cancel/retry/reconnect against the v2 contract, and rendering of citations / tool progress+errors / structured artifacts from TYPED TRUSTED events; server-side credentials only (zero credentials in the browser bundle, enforced by a tested guardrail). Targets exit criteria 1, 2, 3.
+- **9d — Browser E2E (Playwright, opt-in).** End-to-end coverage of primary journeys, recovery paths (cancel/retry/reconnect), and unauthorized-access attempts; NOT part of the offline `npm test` / CI-fast path. Targets exit criterion 4.
+
+**Scope boundary:** Phase 9 is the browser experience over the stable service + versioned event contract ONLY. It wires the Phase 6 agent and the Phase 8 RAG/citations into the service/SSE + UI. Production hardening — rate limits, abuse controls, memory trimming/summarization, retention/privacy enforcement, routing/fallback policy, and load/failure validation — is Phase 10.
 
 ### Phase 10 — Production Hardening and Continuous Evaluation
 
@@ -457,3 +478,4 @@ Add one concise row only after approval; do not use this table as a session log.
 | 2026-08-06 | Phase 7 | Active → Complete (user-approved; baseline thresholds approved; criterion-4 native-vs-truncated interpretation accepted) | User-approved Phase 7 closeout | All five Phase 7 exit criteria ticked above; 7a–7e Complete; approved retrieval baseline recall@k≥0.80/precision@k≥0.18/MRR≥0.70/nDCG@k≥0.75 met per [`docs/retrieval/2026-08-06.md`](retrieval/2026-08-06.md); crit-4 native-vs-truncated interpretation with regenerated [`docs/embeddings/2026-08-06.md`](embeddings/2026-08-06.md); 498 offline tests, `npm run typecheck` and `npm run build` pass; reviewed. No phase active; Phase 8 becomes next proposed (not active until user-approved) |
 | 2026-08-06 | Phase 8 | Planned → Active (user-approved) | User-approved Phase 8 activation with approved design decisions and increment plan | No Phase 8 exit criteria met yet; increment plan 8a–8d and approved decisions (deterministic two-step retrieve-then-generate; app-assigned citation markers resolved by app code to retrieved/authorized IDs, never from model text; Zod `GroundedAnswer` via `withStructuredOutput` reusing Phase 6 structured output incl. opus temp-omit, default `claude-sonnet-4-6`; retrieved content treated as untrusted data w/ prompt-injection guardrail; PURE/injected library not wired to service/CLI/SSE this phase; groundedness/citation eval thresholds PROPOSED pending user approval at closeout; agentic retrieval deferred via ADR) recorded above; Phase 9 becomes next proposed |
 | 2026-08-06 | Phase 8 | Active → Complete (user-approved; RAG-eval baseline ratified — meanCitationPrecision 0.70, others as proposed; DEFAULT_MIN_EVIDENCE_SCORE 0.5) | User-approved Phase 8 closeout | All four Phase 8 exit criteria ticked above; 8a–8d Complete; grounded two-step RAG with app-owned trusted citations (crit 1), evidenceStatus supported-vs-insufficient reconciliation (crit 2), deterministic RAG eval across groundedness/citation P-R/injection/missing-evidence with ratified baseline met per [`docs/rag-eval/2026-08-06.md`](rag-eval/2026-08-06.md) (crit 3), agentic retrieval deferred via [`docs/adr/0001-defer-agentic-retrieval.md`](adr/0001-defer-agentic-retrieval.md) (crit 4); 602 offline tests, `npm run typecheck` and `npm run build` pass; reviewed. No phase active; Phase 9 becomes next proposed (not active until user-approved) |
+| 2026-08-06 | Phase 9 | Planned → Active (user-approved) | User-approved Phase 9 activation with approved design decisions and increment plan | No Phase 9 exit criteria met yet; increment plan 9a–9d and approved decisions (extend typed SSE to versioned v2 with citation/tool-state/artifact events, backward-compatible; keep `node:http` `createServer(deps)`+SSE, wire RAG/agent via `StreamingChat`; React+Vite thin client; ZERO provider creds in the browser bundle as a tested guardrail; Phase-5 auth unchanged — `ownerId` from bearer token only, `thread_id` is not identity; Playwright browser E2E opt-in, separate from offline `npm test`) recorded above; Phase 10 becomes next proposed |
