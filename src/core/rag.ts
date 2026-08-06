@@ -12,6 +12,11 @@ import {
   type QueryEmbedder,
   type RetrievedChunk,
 } from "./retriever.js";
+import {
+  resolveCitations,
+  type TrustedCitation,
+  type DroppedCitation,
+} from "./citations.js";
 import type { KnowledgeStore } from "./knowledge-store.js";
 
 // Phase 8 (increment 8a): GROUNDED GENERATION CORE — the deterministic two-step
@@ -30,18 +35,21 @@ import type { KnowledgeStore } from "./knowledge-store.js";
 // boundary is injectable so the offline suite runs it end-to-end with a fake
 // retrieveFn + a MOCKED model (via the createChatModel factory mock).
 //
-// SCOPE (8a) vs DEFERRED (8b/8c) — read carefully:
+// SCOPE (8a/8b) vs DEFERRED (8c) — read carefully:
 //   - 8a establishes the retrieve -> marked-context -> structured-answer pipeline
 //     and the APP-ASSIGNED integer-marker contract. It returns the RAW
 //     GroundedAnswer (answer + citation markers + insufficientEvidence), the
 //     app-owned marker->RetrievedChunk map, and the retrieved set used.
-//   - TODO(8b): AUTHORITATIVE resolution of each model-emitted marker back to the
-//     trusted/authorized chunk/document IDs, and DROPPING/FLAGGING any marker not
-//     in the retrieved set. 8a intentionally does NOT validate/drop markers — it
-//     hands 8b the map + raw markers to do that. The output shape is kept
-//     forward-compatible (a later `resolvedCitations` field can be added).
+//   - 8b (DONE): AUTHORITATIVE resolution of each model-emitted marker back to the
+//     trusted/authorized chunk/document IDs, and DROPPING any marker not in the
+//     app-owned markerMap (unknown/hallucinated) or outside the caller's
+//     authorization (unauthorized). This is now COMPUTED here and returned
+//     ADDITIVELY as `resolvedCitations` (+ `droppedCitations`) via the pure
+//     resolver in src/core/citations.ts. The 8a fields are UNCHANGED; the RAW
+//     GroundedAnswer is still surfaced as `answer`. Resolution keys off
+//     `markerMap` (NOT `retrieved`) — see the GroundedAnswerResult note.
 //   - TODO(8c): the deterministic LOW-SCORE / insufficient-evidence POLICY
-//     (thresholds on retrieval scores). 8a only handles the TRIVIAL empty case
+//     (thresholds on retrieval scores). 8a/8b only handle the TRIVIAL empty case
 //     (see EMPTY-RETRIEVAL BEHAVIOR below); the model otherwise decides
 //     insufficientEvidence from the context per the guardrail prompt.
 
@@ -90,21 +98,35 @@ export interface AnswerQuestionOptions {
   generateFn?: GenerateGroundedFn;
 }
 
-// The result of answerQuestion. Kept FORWARD-COMPATIBLE with 8b: 8b will resolve
-// `answer.citations` markers against `markerMap` into trusted, authorized IDs
-// (likely adding a `resolvedCitations` field), without changing these fields.
+// The result of answerQuestion. 8b ADDED `resolvedCitations`/`droppedCitations`
+// WITHOUT changing any 8a field (the shape is additive, so existing 8a callers
+// and tests are unaffected).
 //   - answer:     the RAW GroundedAnswer from the model (answer text, citation
-//                 MARKER numbers, insufficientEvidence). NOT yet validated for
-//                 marker-in-range — that is TODO(8b).
+//                 MARKER numbers, insufficientEvidence). This is the UNVALIDATED
+//                 model output — resolution/authorization is applied SEPARATELY
+//                 in `resolvedCitations` (8b); the raw markers are kept here so a
+//                 caller can see exactly what the model emitted.
+//   - resolvedCitations: (8b) the TRUSTED, AUTHORIZED citations — the resolver's
+//                 output over `answer.citations` + `markerMap` (+ the request's
+//                 ownerId). Every field is APP-OWNED (copied from the markerMap's
+//                 RetrievedChunk, never from model text). A marker the app did not
+//                 assign (unknown/hallucinated) or a chunk outside the caller's
+//                 authorization is NOT present here (it appears in
+//                 `droppedCitations`). Empty on the empty-retrieval short-circuit.
+//                 This is the concrete satisfaction of exit criterion 1.
+//   - droppedCitations: (8b) the raw markers that were NOT emitted as trusted
+//                 citations, each with a typed reason ("unknown_marker" /
+//                 "unauthorized"), for observability / eval. Empty on the
+//                 empty-retrieval short-circuit.
 //   - markerMap:  the APP-OWNED marker -> RetrievedChunk map (assigned in
-//                 retrieval order). The bridge 8b uses to resolve markers to
-//                 trusted chunk/document IDs. Empty when nothing was retrieved.
+//                 retrieval order). The bridge used to resolve markers to trusted
+//                 chunk/document IDs. Empty when nothing was retrieved.
 //   - retrieved:  the RetrievedChunk[] the answer was grounded on (retrieval
 //                 order, trusted app-owned metadata from the store). NOTE: this
 //                 MAY contain chunks that did not resolve to a store row (e.g. a
 //                 stale vector whose row vanished) and therefore have NO
-//                 corresponding markerMap entry. 8b MUST key citation
-//                 resolution/authorization off `markerMap`, NOT off `retrieved`.
+//                 corresponding markerMap entry. Citation resolution/authorization
+//                 keys off `markerMap`, NOT off `retrieved`.
 //   - contextBlock: the exact numbered/delimited DATA block shown to the model
 //                 (useful for eval/debugging). NOTE: this block is NOT itself
 //                 passed through redactText — it contains VERBATIM store chunk
@@ -112,6 +134,8 @@ export interface AnswerQuestionOptions {
 //                 AGENTS.md always-redact convention).
 export interface GroundedAnswerResult {
   answer: GroundedAnswer;
+  resolvedCitations: TrustedCitation[];
+  droppedCitations: DroppedCitation[];
   markerMap: Map<number, RetrievedChunk>;
   retrieved: RetrievedChunk[];
   contextBlock: string;
@@ -164,15 +188,26 @@ function resolveChunkTexts(
  *      (transport / refusal-or-no-output / schema-validation) — this module does
  *      NOT swallow them; they propagate to the caller redacted.
  *
+ *   4. RESOLVE CITATIONS (8b) — resolve the model's raw citation markers against
+ *      the app-owned `markerMap` (owner-scoped by the request's `ownerId`) into
+ *      TRUSTED, AUTHORIZED citations via the pure resolver in
+ *      src/core/citations.ts. Unknown/hallucinated markers and unauthorized
+ *      chunks are DROPPED (never emitted as a citation); the raw GroundedAnswer
+ *      is left untouched. This is the exit-criterion-1 guarantee: no citation is
+ *      accepted solely from model text — the model only supplies an integer
+ *      marker that indexes the app-owned map.
+ *
  * EMPTY-RETRIEVAL BEHAVIOR (documented choice): when retrieval yields ZERO
  * usable chunks, the pipeline SHORT-CIRCUITS to insufficientEvidence=true and
  * does NOT call the model (there is nothing to ground an answer on, so a round
- * trip would be wasted and could only invite an ungrounded answer). This handles
+ * trip would be wasted and could only invite an ungrounded answer). In that case
+ * `resolvedCitations`/`droppedCitations` are BOTH empty (nothing retrieved -> no
+ * trusted citations, consistent with the model-free short-circuit). This handles
  * only the TRIVIAL empty case; the deterministic LOW-SCORE policy is TODO(8c).
  *
- * Returns the raw GroundedAnswer + the marker map + the retrieved set (see
- * GroundedAnswerResult). It does NOT yet resolve/validate markers to trusted IDs
- * — that is TODO(8b).
+ * Returns the raw GroundedAnswer + the resolved/dropped citations + the marker
+ * map + the retrieved set (see GroundedAnswerResult). The 8a fields are unchanged;
+ * `resolvedCitations`/`droppedCitations` are the additive 8b outputs.
  */
 export async function answerQuestion(
   options: AnswerQuestionOptions
@@ -208,8 +243,11 @@ export async function answerQuestion(
   // zero usable chunks (all rows vanished) is also treated as empty. The
   // low-score policy is TODO(8c).
   if (pairs.length === 0) {
+    // Nothing retrieved -> no trusted citations (model-free short-circuit).
     return {
       answer: EMPTY_RETRIEVAL_ANSWER,
+      resolvedCitations: [],
+      droppedCitations: [],
       markerMap: context.markerMap,
       retrieved,
       contextBlock: context.block,
@@ -239,8 +277,19 @@ export async function answerQuestion(
     );
   }
 
+  // (4) RESOLVE CITATIONS (8b). Key resolution off the APP-OWNED markerMap (never
+  // `retrieved`) and pass the request's ownerId so citations are authorization-
+  // consistent with retrieval (defense-in-depth atop retrieve()'s owner filter).
+  const { resolved, dropped } = resolveCitations({
+    citations: answer.citations,
+    markerMap: context.markerMap,
+    ownerId,
+  });
+
   return {
     answer,
+    resolvedCitations: resolved,
+    droppedCitations: dropped,
     markerMap: context.markerMap,
     retrieved,
     contextBlock: context.block,

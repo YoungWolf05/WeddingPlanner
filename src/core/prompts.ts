@@ -75,7 +75,7 @@ export const GROUNDED_CONTEXT_FIRST_MARKER = 1;
 //   - block:     the deterministic, numbered, delimited string handed to the
 //                model as untrusted DATA.
 //   - markerMap: the APP-OWNED map from each assigned marker number to the
-//                RetrievedChunk it labels. This is what lets app code (TODO(8b))
+//                RetrievedChunk it labels. This is what lets app code (8b, src/core/citations.ts)
 //                resolve a model-emitted marker back to a TRUSTED chunk/document
 //                ID — the model never supplies IDs, only marker numbers.
 export interface GroundedContext {

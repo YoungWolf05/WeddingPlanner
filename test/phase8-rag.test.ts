@@ -367,6 +367,92 @@ describe("Phase 8 (8a) — answerQuestion pipeline", () => {
   });
 });
 
+// ---- Trusted citation resolution wired into the pipeline (8b) ---------------
+
+describe("Phase 8 (8b) — answerQuestion resolves trusted citations", () => {
+  it("returns resolvedCitations whose identity comes from the retrieved (markerMap) chunks", async () => {
+    const c0 = makeChunk({ chunkId: "a", documentId: "doc-a", sourceUri: "knowledge/corpus/a.md" });
+    const c1 = makeChunk({ chunkId: "b", documentId: "doc-b", sourceUri: "knowledge/corpus/b.md" });
+    const store = makeStoreStub(new Map([["a", "text a"], ["b", "text b"]]));
+    control.next = { answer: "grounded", citations: [1, 2], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      retrieveFn: () => Promise.resolve([c0, c1]),
+    });
+
+    // Raw answer (8a) is unchanged.
+    expect(result.answer.citations).toEqual([1, 2]);
+    // Trusted citations (8b), identity FROM the store-backed markerMap chunks.
+    expect(result.resolvedCitations).toHaveLength(2);
+    expect(result.resolvedCitations[0]!.chunkId).toBe(c0.chunkId);
+    expect(result.resolvedCitations[0]!.documentId).toBe(c0.documentId);
+    expect(result.resolvedCitations[0]!.sourceUri).toBe(c0.sourceUri);
+    expect(result.resolvedCitations[1]!.chunkId).toBe(c1.chunkId);
+    // markerMap identity matches the resolved citation.
+    expect(result.markerMap.get(1)).toBe(c0);
+    expect(result.markerMap.get(2)).toBe(c1);
+    expect(result.droppedCitations).toEqual([]);
+  });
+
+  it("drops an out-of-range marker the scripted model emitted (unknown_marker)", async () => {
+    const c0 = makeChunk({ chunkId: "a" });
+    const store = makeStoreStub(new Map([["a", "text a"]]));
+    // Only ONE chunk retrieved, but the model cites 1 AND 5 (hallucinated).
+    control.next = { answer: "grounded", citations: [1, 5], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      retrieveFn: () => Promise.resolve([c0]),
+    });
+
+    expect(result.resolvedCitations.map((r) => r.marker)).toEqual([1]);
+    expect(result.droppedCitations).toEqual([{ marker: 5, reason: "unknown_marker" }]);
+  });
+
+  it("drops an unauthorized citation under an ownerId scope even if the model cited it", async () => {
+    // Defense-in-depth: retrieveFn is faked to (wrongly) include a cross-owner
+    // chunk; 8b's resolver must still drop it under the request's owner scope.
+    const mine = makeChunk({ chunkId: "a", ownerId: "owner-1" });
+    const theirs = makeChunk({ chunkId: "b", ownerId: "owner-2" });
+    const store = makeStoreStub(new Map([["a", "text a"], ["b", "text b"]]));
+    control.next = { answer: "grounded", citations: [1, 2], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      ownerId: "owner-1",
+      retrieveFn: () => Promise.resolve([mine, theirs]),
+    });
+
+    expect(result.resolvedCitations.map((r) => r.chunkId)).toEqual(["a"]);
+    expect(result.droppedCitations).toEqual([{ marker: 2, reason: "unauthorized" }]);
+  });
+
+  it("empty-retrieval short-circuit -> resolvedCitations [] and model NOT called", async () => {
+    const store = makeStoreStub(new Map());
+    control.next = { answer: "UNUSED", citations: [1], insufficientEvidence: false };
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 5,
+      retrieveFn: () => Promise.resolve([]),
+    });
+    expect(result.resolvedCitations).toEqual([]);
+    expect(result.droppedCitations).toEqual([]);
+    expect(control.captured).toHaveLength(0);
+  });
+});
+
 // ---- Empty retrieval short-circuit -----------------------------------------
 
 describe("Phase 8 (8a) — empty retrieval short-circuit", () => {

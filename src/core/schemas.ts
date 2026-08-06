@@ -192,8 +192,11 @@ export type PlanningChecklist = z.infer<typeof planningChecklistSchema>;
 // 8a establishes this marker contract and returns the raw markers plus the
 // app-owned marker->RetrievedChunk map (see src/core/rag.ts). The AUTHORITATIVE
 // resolution of markers back to trusted/authorized chunk/document IDs, and the
-// dropping/flagging of any marker NOT in the retrieved set, is TODO(8b) — 8a
-// deliberately does not validate or drop out-of-range markers here.
+// dropping of any marker NOT in the app-owned markerMap (unknown/hallucinated) or
+// outside the caller's authorization (unauthorized), is done in 8b by the pure
+// resolver in src/core/citations.ts (surfaced additively on
+// GroundedAnswerResult.resolvedCitations). This schema itself is unchanged by 8b:
+// `citations` remains the RAW app-assigned integer markers the model echoed.
 //
 // The schema is a PLAIN z.object (per-field constraints only, no cross-field
 // `.refine()`) so it converts cleanly to JSON Schema for provider-native
@@ -229,7 +232,8 @@ export const groundedAnswerSchema = z.object({
  * A grounded RAG answer produced via structured output: the natural-language
  * `answer`, the APP-ASSIGNED integer citation `markers` it relied on, and an
  * `insufficientEvidence` flag. Citation markers index the numbered context block
- * and are resolved to trusted, app-owned IDs by app code (TODO(8b)) — they are
- * NEVER trusted source IDs coming from the model.
+ * and are resolved to trusted, app-owned IDs by app code (8b, in
+ * src/core/citations.ts) — they are NEVER trusted source IDs coming from the
+ * model.
  */
 export type GroundedAnswer = z.infer<typeof groundedAnswerSchema>;
