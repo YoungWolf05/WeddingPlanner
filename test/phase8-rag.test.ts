@@ -42,7 +42,9 @@ vi.mock("../src/core/model.js", () => ({
 const {
   answerQuestion,
   buildGroundedMessages,
+  reconcileEvidence,
 } = await import("../src/core/rag.js");
+const { DEFAULT_MIN_EVIDENCE_SCORE } = await import("../src/core/evidence.js");
 const {
   buildGroundedContext,
   GROUNDED_ANSWER_SYSTEM_PROMPT,
@@ -53,6 +55,7 @@ const {
 const { groundedAnswerSchema } = await import("../src/core/schemas.js");
 
 import type { RetrievedChunk } from "../src/core/retriever.js";
+import type { TrustedCitation } from "../src/core/citations.js";
 import type { KnowledgeStore, KnowledgeChunk } from "../src/core/knowledge-store.js";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 
@@ -471,6 +474,7 @@ describe("Phase 8 (8a) — empty retrieval short-circuit", () => {
     expect(result.answer.citations).toEqual([]);
     expect(result.retrieved).toEqual([]);
     expect(result.markerMap.size).toBe(0);
+    expect(result.evidenceStatus).toBe("insufficient");
     // The model must NOT have been constructed/invoked.
     expect(control.captured).toHaveLength(0);
     expect(control.lastMessages).toBeUndefined();
@@ -547,5 +551,223 @@ describe("Phase 8 (8a) — structured-output failure paths propagate redacted", 
     expect(message).not.toContain("test-fake-litellm");
     expect(message).toContain("[redacted-key]");
     expect(message).toContain("[redacted-url]");
+  });
+});
+
+// ---- 8c: insufficient-evidence policy (low-score gate + reconciliation) ------
+
+describe("Phase 8 (8c) — reconcileEvidence (pure post-generation reconciliation)", () => {
+  const trusted = (marker: number): TrustedCitation => ({
+    marker,
+    chunkId: `c${marker}`,
+    documentId: `d${marker}`,
+    sourceUri: `s${marker}`,
+    chunkIndex: 0,
+    ownerId: null,
+    contentHash: `h${marker}`,
+    score: 1,
+  });
+
+  it("model insufficientEvidence=true -> insufficient, citations emptied", () => {
+    const out = reconcileEvidence(true, [trusted(1)]);
+    expect(out.evidenceStatus).toBe("insufficient");
+    expect(out.resolvedCitations).toEqual([]);
+  });
+
+  it("model false + ZERO trusted citations -> FORCED insufficient (crit-2 crux)", () => {
+    const out = reconcileEvidence(false, []);
+    expect(out.evidenceStatus).toBe("insufficient");
+    expect(out.resolvedCitations).toEqual([]);
+  });
+
+  it("model false + >= 1 trusted citation -> supported, citations passed through", () => {
+    const cites = [trusted(1), trusted(2)];
+    const out = reconcileEvidence(false, cites);
+    expect(out.evidenceStatus).toBe("supported");
+    expect(out.resolvedCitations).toEqual(cites);
+  });
+});
+
+describe("Phase 8 (8c) — answerQuestion low-score pre-generation gate", () => {
+  it("all retrieved chunks below minScore -> insufficient, model NOT called, empty citations/context", async () => {
+    const weak0 = makeChunk({ chunkId: "a", score: 0.2 });
+    const weak1 = makeChunk({ chunkId: "b", score: 0.1 });
+    const store = makeStoreStub(new Map([["a", "text a"], ["b", "text b"]]));
+    // Scripted output must NEVER be used (model not called on the short-circuit).
+    control.next = { answer: "SHOULD NOT BE USED", citations: [1], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      minScore: 0.5,
+      retrieveFn: () => Promise.resolve([weak0, weak1]),
+    });
+
+    expect(result.evidenceStatus).toBe("insufficient");
+    expect(result.answer.insufficientEvidence).toBe(true);
+    expect(result.answer.answer).toBe("");
+    expect(result.resolvedCitations).toEqual([]);
+    expect(result.droppedCitations).toEqual([]);
+    // Context / markerMap built from the (empty) usable set only.
+    expect(result.markerMap.size).toBe(0);
+    expect(result.contextBlock).toBe("");
+    // The retrieved set is still surfaced verbatim.
+    expect(result.retrieved).toEqual([weak0, weak1]);
+    // PROOF: the model was never constructed / invoked.
+    expect(control.captured).toHaveLength(0);
+    expect(control.lastMessages).toBeUndefined();
+  });
+
+  it("above-threshold usable chunks + model cites a usable marker -> SUPPORTED", async () => {
+    const strong = makeChunk({ chunkId: "a", score: 0.9 });
+    const store = makeStoreStub(new Map([["a", "strong grounding text"]]));
+    control.next = { answer: "grounded", citations: [1], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      minScore: 0.5,
+      retrieveFn: () => Promise.resolve([strong]),
+    });
+
+    expect(result.evidenceStatus).toBe("supported");
+    expect(result.answer.insufficientEvidence).toBe(false);
+    expect(result.resolvedCitations.map((c) => c.chunkId)).toEqual(["a"]);
+    expect(result.markerMap.get(1)).toBe(strong);
+    // The model WAS invoked (usable evidence present).
+    expect(control.captured).toHaveLength(1);
+  });
+
+  it("post-gen reconciliation: model says sufficient but cites only unknown markers -> reconciled insufficient", async () => {
+    const strong = makeChunk({ chunkId: "a", score: 0.9 });
+    const store = makeStoreStub(new Map([["a", "grounding text"]]));
+    // Usable evidence exists (so the model IS called), but the model cites ONLY a
+    // hallucinated marker (5) that the app never assigned -> resolvedCitations
+    // empty after 8b -> reconciled to insufficient (unsupported not presented as
+    // supported).
+    control.next = { answer: "confident but ungrounded", citations: [5], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      minScore: 0.5,
+      retrieveFn: () => Promise.resolve([strong]),
+    });
+
+    // The model DID run (evidence was usable) ...
+    expect(control.captured).toHaveLength(1);
+    // ... but the app reconciled to insufficient: zero trusted citations back it.
+    expect(result.evidenceStatus).toBe("insufficient");
+    expect(result.resolvedCitations).toEqual([]);
+    // The raw model flag is preserved for observability (NOT authoritative).
+    expect(result.answer.insufficientEvidence).toBe(false);
+    // The hallucinated marker is still recorded as dropped (8b observability).
+    expect(result.droppedCitations).toEqual([{ marker: 5, reason: "unknown_marker" }]);
+  });
+
+  it("model declares insufficientEvidence=true even with usable evidence -> respected, no citations", async () => {
+    const strong = makeChunk({ chunkId: "a", score: 0.9 });
+    const store = makeStoreStub(new Map([["a", "grounding text"]]));
+    // Model cites a valid usable marker BUT declares insufficiency: respect it.
+    control.next = { answer: "", citations: [1], insufficientEvidence: true };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      minScore: 0.5,
+      retrieveFn: () => Promise.resolve([strong]),
+    });
+
+    expect(control.captured).toHaveLength(1); // model ran (usable evidence)
+    expect(result.evidenceStatus).toBe("insufficient");
+    expect(result.resolvedCitations).toEqual([]); // no citations on insufficient
+    expect(result.answer.insufficientEvidence).toBe(true);
+  });
+
+  it("minScore is injectable: the SAME chunk flips outcome across thresholds", async () => {
+    const chunk = makeChunk({ chunkId: "a", score: 0.6 });
+    const store = makeStoreStub(new Map([["a", "grounding text"]]));
+
+    // Low threshold: chunk is usable -> model runs -> supported.
+    control.next = { answer: "grounded", citations: [1], insufficientEvidence: false };
+    const low = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      minScore: 0.5,
+      retrieveFn: () => Promise.resolve([chunk]),
+    });
+    expect(low.evidenceStatus).toBe("supported");
+    expect(control.captured).toHaveLength(1);
+
+    // High threshold: same chunk now below cutoff -> short-circuit, model NOT called.
+    control.captured.length = 0;
+    control.lastMessages = undefined;
+    const high = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      minScore: 0.7,
+      retrieveFn: () => Promise.resolve([chunk]),
+    });
+    expect(high.evidenceStatus).toBe("insufficient");
+    expect(control.captured).toHaveLength(0);
+  });
+
+  it("markers only map to USABLE chunks: a sub-threshold chunk is never in markerMap", async () => {
+    const strong = makeChunk({ chunkId: "keep", score: 0.9 });
+    const weak = makeChunk({ chunkId: "drop", score: 0.1 });
+    const store = makeStoreStub(
+      new Map([["keep", "strong text"], ["drop", "weak text"]])
+    );
+    control.next = { answer: "grounded", citations: [1], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 5,
+      minScore: 0.5,
+      retrieveFn: () => Promise.resolve([strong, weak]),
+    });
+
+    // Only the usable chunk is markable (marker 1 -> keep); the weak chunk has no
+    // marker at all, so the model can never cite filtered-out evidence.
+    expect(result.markerMap.size).toBe(1);
+    expect(result.markerMap.get(1)).toBe(strong);
+    expect([...result.markerMap.values()].map((c) => c.chunkId)).not.toContain("drop");
+    // The weak chunk's text is NOT shown to the model.
+    expect(String((control.lastMessages as { content: unknown }[])[1]!.content)).not.toContain(
+      "weak text"
+    );
+  });
+
+  it("defaults minScore to DEFAULT_MIN_EVIDENCE_SCORE when omitted", async () => {
+    // score just below the default (0.5) -> unusable with no explicit minScore.
+    const belowDefault = makeChunk({ chunkId: "a", score: DEFAULT_MIN_EVIDENCE_SCORE - 0.01 });
+    const store = makeStoreStub(new Map([["a", "text a"]]));
+    control.next = { answer: "unused", citations: [1], insufficientEvidence: false };
+
+    const result = await answerQuestion({
+      store,
+      queryEmbedder: fakeEmbedder,
+      query: "q",
+      k: 3,
+      // minScore intentionally omitted.
+      retrieveFn: () => Promise.resolve([belowDefault]),
+    });
+
+    expect(result.evidenceStatus).toBe("insufficient");
+    expect(control.captured).toHaveLength(0);
   });
 });

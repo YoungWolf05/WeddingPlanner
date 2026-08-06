@@ -17,6 +17,11 @@ import {
   type TrustedCitation,
   type DroppedCitation,
 } from "./citations.js";
+import {
+  filterUsableEvidence,
+  DEFAULT_MIN_EVIDENCE_SCORE,
+  type EvidencePair,
+} from "./evidence.js";
 import type { KnowledgeStore } from "./knowledge-store.js";
 
 // Phase 8 (increment 8a): GROUNDED GENERATION CORE — the deterministic two-step
@@ -35,7 +40,7 @@ import type { KnowledgeStore } from "./knowledge-store.js";
 // boundary is injectable so the offline suite runs it end-to-end with a fake
 // retrieveFn + a MOCKED model (via the createChatModel factory mock).
 //
-// SCOPE (8a/8b) vs DEFERRED (8c) — read carefully:
+// SCOPE (8a/8b/8c) — read carefully:
 //   - 8a establishes the retrieve -> marked-context -> structured-answer pipeline
 //     and the APP-ASSIGNED integer-marker contract. It returns the RAW
 //     GroundedAnswer (answer + citation markers + insufficientEvidence), the
@@ -48,10 +53,27 @@ import type { KnowledgeStore } from "./knowledge-store.js";
 //     resolver in src/core/citations.ts. The 8a fields are UNCHANGED; the RAW
 //     GroundedAnswer is still surfaced as `answer`. Resolution keys off
 //     `markerMap` (NOT `retrieved`) — see the GroundedAnswerResult note.
-//   - TODO(8c): the deterministic LOW-SCORE / insufficient-evidence POLICY
-//     (thresholds on retrieval scores). 8a/8b only handle the TRIVIAL empty case
-//     (see EMPTY-RETRIEVAL BEHAVIOR below); the model otherwise decides
-//     insufficientEvidence from the context per the guardrail prompt.
+//   - 8c (DONE): the deterministic INSUFFICIENT-EVIDENCE POLICY (targets exit
+//     criterion 2 — answers distinguish SUPPORTED claims from INSUFFICIENT
+//     evidence). Two deterministic, app-side gates now bracket generation:
+//       (i) PRE-GENERATION LOW-SCORE GATE. Only chunks whose bounded similarity
+//           `score` clears an injectable `minScore` (default
+//           DEFAULT_MIN_EVIDENCE_SCORE, PROPOSED pending eval/closeout
+//           ratification — see src/core/evidence.ts) are treated as USABLE. The
+//           context/markerMap are built from the USABLE set ONLY, so the model is
+//           never shown sub-threshold chunks and markers can only ever map to
+//           usable evidence (keeping 8b citations quality/authorization-
+//           consistent). If NO chunk clears minScore, the pipeline SHORT-CIRCUITS
+//           to insufficientEvidence=true WITHOUT calling the model — a strict
+//           generalization of the 8a empty-retrieval short-circuit (empty
+//           retrieval is just the special case where the usable set is empty).
+//      (ii) POST-GENERATION RECONCILIATION. The RETURNED insufficientEvidence is
+//           the APP-AUTHORITATIVE reconciled value (the raw model flag stays on
+//           `answer.insufficientEvidence`). See reconcileEvidence + the
+//           evidenceStatus field for the exact, documented rules — in particular
+//           a model answer that claims sufficiency but resolves to ZERO trusted
+//           citations is FORCED to insufficient, so an ungrounded answer is never
+//           presented as supported (the crux of exit criterion 2).
 
 // The injectable retrieval seam. Defaults to the real retriever's retrieve();
 // offline tests inject a deterministic fake so the pipeline runs without a store
@@ -92,6 +114,12 @@ export interface AnswerQuestionOptions {
   // OPTIONAL system-prompt override. Defaults to GROUNDED_ANSWER_SYSTEM_PROMPT
   // (the grounded-answer guardrail). Overriding is for tests/advanced callers.
   systemPrompt?: string;
+  // OPTIONAL (8c) minimum similarity score a retrieved chunk must reach to be
+  // treated as USABLE evidence (inclusive: score >= minScore). Defaults to
+  // DEFAULT_MIN_EVIDENCE_SCORE (PROPOSED pending eval/closeout ratification —
+  // see src/core/evidence.ts). Tunable so 8d / closeout can ratify the default
+  // and advanced callers can adjust the low-score cutoff.
+  minScore?: number;
   // OPTIONAL injected retrieval seam (defaults to the real retrieve()).
   retrieveFn?: RetrieveFn;
   // OPTIONAL injected generation seam (defaults to the structured-output helper).
@@ -99,13 +127,25 @@ export interface AnswerQuestionOptions {
 }
 
 // The result of answerQuestion. 8b ADDED `resolvedCitations`/`droppedCitations`
-// WITHOUT changing any 8a field (the shape is additive, so existing 8a callers
-// and tests are unaffected).
+// and 8c ADDED `evidenceStatus`, both WITHOUT changing any earlier field (the
+// shape is additive, so existing 8a/8b callers and tests are unaffected).
+//
+// AUTHORITATIVE INSUFFICIENT-EVIDENCE VALUE (8c). `answer.insufficientEvidence`
+// is the RAW model flag (kept verbatim for observability). The APP-AUTHORITATIVE,
+// RECONCILED decision is `evidenceStatus` ("supported" | "insufficient"): callers
+// and eval MUST read `evidenceStatus` (or equivalently treat
+// `evidenceStatus === "insufficient"` as the authoritative insufficient flag),
+// NOT the raw `answer.insufficientEvidence`, which may differ after reconciliation
+// (e.g. a model that claimed sufficiency but produced zero trusted citations is
+// reconciled to "insufficient"). `resolvedCitations` is always consistent with
+// `evidenceStatus`: an "insufficient" result carries NO trusted citations.
 //   - answer:     the RAW GroundedAnswer from the model (answer text, citation
 //                 MARKER numbers, insufficientEvidence). This is the UNVALIDATED
 //                 model output — resolution/authorization is applied SEPARATELY
 //                 in `resolvedCitations` (8b); the raw markers are kept here so a
-//                 caller can see exactly what the model emitted.
+//                 caller can see exactly what the model emitted. NOTE (8c): the
+//                 raw `answer.insufficientEvidence` is NOT the authoritative
+//                 decision — read `evidenceStatus` instead.
 //   - resolvedCitations: (8b) the TRUSTED, AUTHORIZED citations — the resolver's
 //                 output over `answer.citations` + `markerMap` (+ the request's
 //                 ownerId). Every field is APP-OWNED (copied from the markerMap's
@@ -131,7 +171,18 @@ export interface AnswerQuestionOptions {
 //                 (useful for eval/debugging). NOTE: this block is NOT itself
 //                 passed through redactText — it contains VERBATIM store chunk
 //                 text — so any caller that LOGS it MUST redact it first (per the
-//                 AGENTS.md always-redact convention).
+//                 AGENTS.md always-redact convention). Built from the USABLE
+//                 (>= minScore) set only (8c), so it never contains sub-threshold
+//                 chunks and markers only ever map to usable evidence.
+//   - evidenceStatus: (8c) the APP-AUTHORITATIVE, RECONCILED sufficiency verdict:
+//                 "supported" (a grounded answer backed by >= 1 trusted citation)
+//                 or "insufficient" (the evidence does not ground an answer, OR
+//                 the model's answer was not backed by any trusted citation, OR
+//                 the model itself declared insufficiency). This is the field
+//                 callers/eval should treat as authoritative — see the
+//                 AUTHORITATIVE note above and reconcileEvidence for the rules.
+export type EvidenceStatus = "supported" | "insufficient";
+
 export interface GroundedAnswerResult {
   answer: GroundedAnswer;
   resolvedCitations: TrustedCitation[];
@@ -139,12 +190,14 @@ export interface GroundedAnswerResult {
   markerMap: Map<number, RetrievedChunk>;
   retrieved: RetrievedChunk[];
   contextBlock: string;
+  evidenceStatus: EvidenceStatus;
 }
 
-// The GroundedAnswer returned WITHOUT calling the model on the trivial
-// empty-retrieval short-circuit (see EMPTY-RETRIEVAL BEHAVIOR). A fixed,
-// content-free value, so it is inherently redaction-safe.
-const EMPTY_RETRIEVAL_ANSWER: GroundedAnswer = {
+// The GroundedAnswer returned WITHOUT calling the model on the NO-USABLE-EVIDENCE
+// short-circuit (see INSUFFICIENT-EVIDENCE BEHAVIOR): empty retrieval OR every
+// retrieved chunk below minScore. A fixed, content-free value, so it is
+// inherently redaction-safe.
+const NO_USABLE_EVIDENCE_ANSWER: GroundedAnswer = {
   answer: "",
   citations: [],
   insufficientEvidence: true,
@@ -158,8 +211,8 @@ const EMPTY_RETRIEVAL_ANSWER: GroundedAnswer = {
 function resolveChunkTexts(
   store: KnowledgeStore,
   retrieved: RetrievedChunk[]
-): { chunk: RetrievedChunk; text: string }[] {
-  const pairs: { chunk: RetrievedChunk; text: string }[] = [];
+): EvidencePair[] {
+  const pairs: EvidencePair[] = [];
   for (const chunk of retrieved) {
     const row = store.getChunk(chunk.chunkId);
     if (row === null) continue; // defensive: vector without its chunk row.
@@ -197,17 +250,43 @@ function resolveChunkTexts(
  *      accepted solely from model text — the model only supplies an integer
  *      marker that indexes the app-owned map.
  *
- * EMPTY-RETRIEVAL BEHAVIOR (documented choice): when retrieval yields ZERO
- * usable chunks, the pipeline SHORT-CIRCUITS to insufficientEvidence=true and
- * does NOT call the model (there is nothing to ground an answer on, so a round
- * trip would be wasted and could only invite an ungrounded answer). In that case
- * `resolvedCitations`/`droppedCitations` are BOTH empty (nothing retrieved -> no
- * trusted citations, consistent with the model-free short-circuit). This handles
- * only the TRIVIAL empty case; the deterministic LOW-SCORE policy is TODO(8c).
+ *   5. RECONCILE EVIDENCE (8c) — compute the APP-AUTHORITATIVE `evidenceStatus`
+ *      from the raw model flag + the resolved trusted citations (see
+ *      reconcileEvidence). The RETURNED insufficient decision is this reconciled
+ *      verdict, NOT the raw model flag.
+ *
+ * INSUFFICIENT-EVIDENCE BEHAVIOR (8c, documented choice) — two deterministic,
+ * app-side gates bracket generation so a SUPPORTED answer is cleanly distinguished
+ * from INSUFFICIENT evidence (exit criterion 2):
+ *
+ *   PRE-GENERATION LOW-SCORE GATE. After resolving chunk texts, the pairs are
+ *   filtered to the USABLE set (score >= `minScore`, default
+ *   DEFAULT_MIN_EVIDENCE_SCORE — PROPOSED pending eval/closeout ratification) via
+ *   the pure filterUsableEvidence. Context + markerMap are built from the USABLE
+ *   set ONLY, so the model never sees sub-threshold chunks and markers can only
+ *   map to usable evidence. When the usable set is EMPTY (empty retrieval OR every
+ *   chunk below minScore OR every row vanished), the pipeline SHORT-CIRCUITS to
+ *   insufficientEvidence=true WITHOUT calling the model (nothing strong enough to
+ *   ground on; a round trip could only invite an ungrounded answer). In that case
+ *   `resolvedCitations`/`droppedCitations` are BOTH empty and evidenceStatus is
+ *   "insufficient". This strictly GENERALIZES the 8a empty-retrieval case (empty
+ *   retrieval is the special case where the usable set is empty).
+ *
+ *   POST-GENERATION RECONCILIATION (see reconcileEvidence). When generation ran,
+ *   the RETURNED insufficient decision is reconciled deterministically:
+ *     - model said insufficientEvidence=true  -> "insufficient", NO citations emitted.
+ *     - model said false but ZERO trusted citations resolved -> FORCED
+ *       "insufficient" (an ungrounded answer is never presented as supported).
+ *     - model said false WITH >= 1 trusted citation -> "supported", returned as-is.
+ *   The raw model flag is preserved on `answer.insufficientEvidence`;
+ *   `evidenceStatus` is the app-authoritative value and `resolvedCitations` is
+ *   kept consistent with it (empty whenever "insufficient").
  *
  * Returns the raw GroundedAnswer + the resolved/dropped citations + the marker
- * map + the retrieved set (see GroundedAnswerResult). The 8a fields are unchanged;
- * `resolvedCitations`/`droppedCitations` are the additive 8b outputs.
+ * map + the retrieved set + the reconciled evidenceStatus (see
+ * GroundedAnswerResult). The 8a fields are unchanged;
+ * `resolvedCitations`/`droppedCitations` (8b) and `evidenceStatus` (8c) are the
+ * additive outputs.
  */
 export async function answerQuestion(
   options: AnswerQuestionOptions
@@ -220,6 +299,7 @@ export async function answerQuestion(
     ownerId,
     model,
     systemPrompt = GROUNDED_ANSWER_SYSTEM_PROMPT,
+    minScore = DEFAULT_MIN_EVIDENCE_SCORE,
     retrieveFn = defaultRetrieve,
     generateFn = defaultGenerateGrounded,
   } = options;
@@ -234,23 +314,30 @@ export async function answerQuestion(
     ownerId,
   });
 
-  // (2) BUILD CONTEXT (pure). Resolve trusted chunk text from the store.
-  const pairs = resolveChunkTexts(store, retrieved);
-  const context: GroundedContext = buildGroundedContext(pairs);
+  // (2) BUILD CONTEXT (pure). Resolve trusted chunk text from the store, THEN
+  // apply the 8c PRE-GENERATION LOW-SCORE GATE: keep only pairs whose chunk
+  // clears `minScore` (score >= minScore). Context + markerMap are built from the
+  // USABLE set ONLY, so the model never sees sub-threshold chunks and markers can
+  // only ever map to usable evidence (keeps 8b citations quality-consistent).
+  const resolvedPairs: EvidencePair[] = resolveChunkTexts(store, retrieved);
+  const usablePairs: EvidencePair[] = filterUsableEvidence(resolvedPairs, minScore);
+  const context: GroundedContext = buildGroundedContext(usablePairs);
 
-  // TRIVIAL EMPTY-RETRIEVAL SHORT-CIRCUIT (see EMPTY-RETRIEVAL BEHAVIOR). Note we
-  // key off the resolved pairs, not `retrieved.length`, so a set that resolved to
-  // zero usable chunks (all rows vanished) is also treated as empty. The
-  // low-score policy is TODO(8c).
-  if (pairs.length === 0) {
-    // Nothing retrieved -> no trusted citations (model-free short-circuit).
+  // NO-USABLE-EVIDENCE SHORT-CIRCUIT (see INSUFFICIENT-EVIDENCE BEHAVIOR / 8c).
+  // Generalizes the 8a empty-retrieval case: the usable set is empty when nothing
+  // was retrieved, when every row vanished, OR when every chunk is below minScore.
+  // In all of these there is nothing strong enough to ground on, so we return
+  // insufficientEvidence=true WITHOUT calling the model, with no trusted citations
+  // and an "insufficient" reconciled status.
+  if (usablePairs.length === 0) {
     return {
-      answer: EMPTY_RETRIEVAL_ANSWER,
+      answer: NO_USABLE_EVIDENCE_ANSWER,
       resolvedCitations: [],
       droppedCitations: [],
       markerMap: context.markerMap,
       retrieved,
       contextBlock: context.block,
+      evidenceStatus: "insufficient",
     };
   }
 
@@ -286,14 +373,69 @@ export async function answerQuestion(
     ownerId,
   });
 
+  // (5) RECONCILE EVIDENCE (8c). Compute the app-authoritative verdict from the
+  // raw model flag + the resolved trusted citations, and keep the returned
+  // citations consistent with it (an "insufficient" result carries none).
+  const { evidenceStatus, resolvedCitations } = reconcileEvidence(
+    answer.insufficientEvidence,
+    resolved
+  );
+
   return {
     answer,
-    resolvedCitations: resolved,
+    resolvedCitations,
     droppedCitations: dropped,
     markerMap: context.markerMap,
     retrieved,
     contextBlock: context.block,
+    evidenceStatus,
   };
+}
+
+/**
+ * Post-generation evidence reconciliation (Phase 8 / 8c). PURE + deterministic.
+ *
+ * Decides the APP-AUTHORITATIVE `evidenceStatus` from the model's RAW
+ * `insufficientEvidence` flag and the TRUSTED citations that actually resolved
+ * (8b). This is the generation-side crux of exit criterion 2: an answer is only
+ * reported "supported" when it is BOTH claimed-sufficient by the model AND backed
+ * by at least one trusted, authorized citation.
+ *
+ * Rules (each documented, each tested):
+ *   1. Model declared insufficientEvidence=true  -> "insufficient". RESPECTED. An
+ *      insufficient-evidence answer carries NO citations, so `resolvedCitations`
+ *      is emptied (documented rule: an insufficient result never emits citations).
+ *   2. Model declared false but ZERO trusted citations resolved (all its markers
+ *      were dropped by 8b as unknown/unauthorized) -> FORCED "insufficient". An
+ *      answer with no trusted citation backing it is UNSUPPORTED and MUST NOT be
+ *      presented as supported; converting to "insufficient" (rather than a
+ *      separate "unsupported" flag) guarantees a claim with zero trusted
+ *      citations is never emitted as a supported answer. `resolvedCitations` is
+ *      already empty here.
+ *   3. Model declared false WITH >= 1 trusted citation -> "supported". Returned
+ *      as-is with its resolved citations.
+ *
+ * @param rawInsufficient the model's RAW insufficientEvidence flag.
+ * @param resolved        the 8b trusted, authorized citations that resolved.
+ * @returns the reconciled status + the citations consistent with it.
+ */
+export function reconcileEvidence(
+  rawInsufficient: boolean,
+  resolved: TrustedCitation[]
+): { evidenceStatus: EvidenceStatus; resolvedCitations: TrustedCitation[] } {
+  // Rule 1: the model declared insufficiency -> respect it, emit no citations.
+  if (rawInsufficient) {
+    return { evidenceStatus: "insufficient", resolvedCitations: [] };
+  }
+  // Rule 2: claimed sufficient but nothing trusted backs it -> force insufficient.
+  if (resolved.length === 0) {
+    return { evidenceStatus: "insufficient", resolvedCitations: [] };
+  }
+  // Rule 3: claimed sufficient AND >= 1 trusted citation -> supported. Return a
+  // shallow copy (not the caller's array by reference) for purity symmetry with
+  // the two insufficient branches above (which return fresh []); contents are
+  // identical, so behavior is unchanged.
+  return { evidenceStatus: "supported", resolvedCitations: [...resolved] };
 }
 
 // Compose the grounded-answer message array. The retrieved context is embedded
