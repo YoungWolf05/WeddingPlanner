@@ -298,7 +298,7 @@ import { config } from "../config"; // wrong — will fail at runtime
 
 ## Roadmap and phase governance
 
-[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 7 — Knowledge Ingestion and Retrieval** is complete (all five Phase 7 exit criteria met with recorded evidence; increments 7a–7e delivered, reviewed, and covered by the offline suite). No phase is currently active. **Phase 8 — Grounded Answers and Trusted Citations** is the next proposed phase and is NOT active until the user approves its activation.
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 7 — Knowledge Ingestion and Retrieval** is complete (all five Phase 7 exit criteria met with recorded evidence; increments 7a–7e delivered, reviewed, and covered by the offline suite). **Phase 8 — Grounded Answers and Trusted Citations** is now ACTIVE (user-approved) with increment plan 8a–8d; no Phase 8 exit criteria are met yet. **Phase 9 — Web Interface** is the next proposed phase and is NOT active until the user approves its activation.
 
 Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 

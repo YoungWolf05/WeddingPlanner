@@ -170,3 +170,66 @@ export const planningChecklistSchema = z.object({
  * with an optional timing hint and completion flag.
  */
 export type PlanningChecklist = z.infer<typeof planningChecklistSchema>;
+
+// Phase 8 (increment 8a): the GROUNDED-ANSWER structured-output contract.
+//
+// The model fills this via `withStructuredOutput` (reusing the Phase 6
+// structured-output plumbing in src/core/structured.ts) after being given a
+// numbered, delimited block of retrieved context (see src/core/prompts.ts and
+// src/core/rag.ts). It is the LLM-facing shape for a grounded RAG answer.
+//
+// CITATION TRUST MODEL — APP-ASSIGNED INTEGER MARKERS, NOT MODEL IDs.
+// -------------------------------------------------------------------
+// `citations` is a list of APP-ASSIGNED CITATION MARKERS: integers that INDEX
+// INTO the app-provided numbered context block (e.g. `[1, 2]` means "context
+// entries 1 and 2 support this answer"). The markers are assigned by APP CODE
+// when it renders the context — the model only ECHOES the marker numbers it
+// relied on. The model MUST NEVER emit chunk/document IDs; those are trusted,
+// app-owned identifiers resolved by app code (see the retriever's
+// RetrievedChunk metadata), never taken from raw model text. This is the crux of
+// Phase 8 exit criterion 1.
+//
+// 8a establishes this marker contract and returns the raw markers plus the
+// app-owned marker->RetrievedChunk map (see src/core/rag.ts). The AUTHORITATIVE
+// resolution of markers back to trusted/authorized chunk/document IDs, and the
+// dropping/flagging of any marker NOT in the retrieved set, is TODO(8b) — 8a
+// deliberately does not validate or drop out-of-range markers here.
+//
+// The schema is a PLAIN z.object (per-field constraints only, no cross-field
+// `.refine()`) so it converts cleanly to JSON Schema for provider-native
+// structured output AND doubles as the defense-in-depth `safeParse` contract
+// (mirrors the SCHEMA LAYERING note above).
+//
+//   - answer:              the grounded natural-language answer. MAY be empty
+//                          when `insufficientEvidence` is true (nothing to say).
+//   - citations:           app-assigned MARKER NUMBERS (non-negative integers)
+//                          that index the numbered context block. Deduped by
+//                          convention at the app layer; the schema only enforces
+//                          the per-element integer/non-negative rule. Defaults to
+//                          an empty array so a model that cites nothing is valid.
+//   - insufficientEvidence: true when the retrieved context does NOT support a
+//                          grounded answer (the model must NOT fabricate). The
+//                          deterministic low-score / empty-retrieval POLICY that
+//                          also drives this flag is TODO(8c); 8a only handles the
+//                          trivial empty-retrieval case (see src/core/rag.ts).
+export const groundedAnswerSchema = z.object({
+  answer: z.string(),
+  citations: z
+    .array(
+      z
+        .number()
+        .int("citation marker must be an integer")
+        .nonnegative("citation marker must be a non-negative integer")
+    )
+    .default([]),
+  insufficientEvidence: z.boolean(),
+});
+
+/**
+ * A grounded RAG answer produced via structured output: the natural-language
+ * `answer`, the APP-ASSIGNED integer citation `markers` it relied on, and an
+ * `insufficientEvidence` flag. Citation markers index the numbered context block
+ * and are resolved to trusted, app-owned IDs by app code (TODO(8b)) — they are
+ * NEVER trusted source IDs coming from the model.
+ */
+export type GroundedAnswer = z.infer<typeof groundedAnswerSchema>;

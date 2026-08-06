@@ -6,10 +6,10 @@
 | --- | --- |
 | Last reviewed | 2026-08-06 |
 | Current completed milestone | **Phase 7 — Knowledge Ingestion and Retrieval** |
-| Active phase | **None** |
-| Next proposed phase | **Phase 8 — Grounded Answers and Trusted Citations** |
+| Active phase | **Phase 8 — Grounded Answers and Trusted Citations** |
+| Next proposed phase | **Phase 9 — Web Interface** |
 
-Phase 7 is complete (all five exit criteria met with recorded evidence; increments 7a–7e delivered, reviewed, and covered by the offline suite) and is the last completed milestone. No phase is currently active. Phase 8 — Grounded Answers and Trusted Citations is the next proposed phase and is not active until the user approves its activation.
+Phase 7 is complete (all five exit criteria met with recorded evidence; increments 7a–7e delivered, reviewed, and covered by the offline suite) and remains the last completed milestone. Phase 8 — Grounded Answers and Trusted Citations is now active (user-approved) with increment plan 8a–8d and the approved design decisions recorded below; no Phase 8 exit criteria are met yet. Phase 9 — Web Interface is the next proposed phase and is not active until the user approves its activation.
 
 ## Status vocabulary
 
@@ -323,7 +323,7 @@ Phase 7 is delivered as ordered, independently verifiable sub-increments; each i
 
 ### Phase 8 — Grounded Answers and Trusted Citations
 
-**Status:** Planned
+**Status:** Active
 
 **Goal:** Generate answers grounded in retrieved evidence with citations the application can trust.
 
@@ -344,7 +344,28 @@ Phase 7 is delivered as ordered, independently verifiable sub-increments; each i
 
 **Implementation evidence and notes**
 
-- RAG and citation behavior are not currently implemented.
+- Phase 8 is active (user-approved); no exit criteria are met yet. It is delivered as ordered, independently verifiable sub-increments (8a–8d), each delivered as implement → code-review → verify, one at a time.
+
+**Approved design decisions (rationale for future readers)**
+
+- **RAG shape:** a DETERMINISTIC TWO-STEP retrieve-then-generate pipeline (the roadmap's stated initial design). No agentic/iterative retrieval in this phase.
+- **Citation trust model:** APP-ASSIGNED integer citation markers (e.g. `[1]`, `[2]`) placed in the prompt context; the APPLICATION maps each marker back to the retrieved chunk/document IDs and ACCEPTS a citation ONLY if it resolves to a chunk/document in the retrieved set. The model NEVER supplies raw IDs; any marker not in the retrieved set is dropped/flagged. This is the crux of exit criterion 1 (citations resolve to retrieved, authorized source IDs, never accepted solely from model text). Owner-scoped via the existing retriever `ownerId` authorization filter (`src/core/retriever.ts`).
+- **Answer output:** STRUCTURED OUTPUT via `withStructuredOutput` + a Zod `GroundedAnswer` schema (fields: `answer`, `citations` [marker references], `insufficientEvidence` flag), reusing the Phase 6 structured-output infrastructure (`src/core/structured.ts`, `src/core/schemas.ts`) including the opus temperature-omit rule (`isTemperatureOmitModel`); default generation model `claude-sonnet-4-6`.
+- **Prompt-injection defense:** retrieved content is treated as UNTRUSTED DATA, not instructions — a delimited context block plus a system-prompt guardrail; malicious-source-instruction resistance is validated by the 8d eval.
+- **Wiring scope:** 8a–8d are delivered as a PURE/INJECTED library (mirroring the retriever/ingestion seams) — NOT wired into the HTTP service / CLI / SSE this phase (that is Phase 9). Everything is offline-testable end-to-end with a MOCKED model + a fake embedder; a LIVE opt-in eval is the only network path.
+- **Eval evidence baseline:** the 8d implementer PROPOSES groundedness / citation precision-recall thresholds; the USER APPROVES them at Phase 8 closeout (same governance as the Phase 7 retrieval baseline) — they are inputs, never pre-marked "met".
+
+**Increment plan (8a–8d)**
+
+Phase 8 is delivered as ordered, independently verifiable sub-increments; each is delivered as implement → code-review → verify. One sub-increment is worked at a time.
+
+- **8a — Grounded generation core.** A pure `answer()` pipeline — `retrieve()` → build a delimited context block where each retrieved chunk carries an APP-ASSIGNED citation marker mapped by app code to its chunkId/documentId → structured-output generation returning `{ answer, citations, insufficientEvidence }`. Injected model boundary (offline tests mock the model). Targets exit criterion 1 (foundation) and exit criterion 2.
+- **8b — Trusted citation resolution.** App code resolves each model-emitted marker back to the retrieved, AUTHORIZED chunk/document IDs from the 8a context set; never accepts an ID from model text; drops/flags any marker not in the retrieved set; owner-scoped. Targets exit criterion 1.
+- **8c — Insufficient-evidence behavior.** Deterministic "not enough grounded evidence" path when retrieval is empty/low-score or a claim can't be grounded; answers distinguish supported claims from insufficient evidence. Targets exit criterion 2.
+- **8d — Evaluations.** Offline pure scorers + a dataset covering GROUNDEDNESS, CITATION precision/recall, PROMPT-INJECTION / malicious-source instructions, and MISSING-EVIDENCE; plus a LIVE opt-in eval producing dated evidence (`docs/rag-eval/<date>.md`) that is NEVER part of `npm test`/CI. Targets exit criterion 3.
+- **Exit criterion 4** (any move to agentic retrieval requires comparative measurements + a separate ADR) is satisfied in this phase by an explicit DECISION RECORD deferring agentic retrieval — NO agentic implementation this phase.
+
+**Scope boundary:** Phase 8 is grounded answers + trusted citations + evaluations ONLY, built on the deterministic two-step RAG design (no agentic retrieval). No web UI — that is Phase 9. Everything is delivered as a pure/injected library and is NOT wired into the HTTP service / CLI / SSE this phase.
 
 ### Phase 9 — Web Interface
 
@@ -428,3 +449,4 @@ Add one concise row only after approval; do not use this table as a session log.
 | 2026-08-05 | Phase 6 | Active → Complete (user-approved; criterion-3 interpretation endorsed); Phase 7 becomes next proposed | User-approved Phase 6 closeout | All four Phase 6 exit criteria ticked above; 6a–6d Complete (6d bounded tool timeout `src/core/tool-runtime.ts`, refusal/malformed/provider handling in `src/core/structured.ts` incl. N1 empty-object hardening, only-permitted + tool-state/error agent message-contract tests, opt-in per-alias live contract probe `src/probe-contracts.ts` / `npm run test:contracts`); criterion 3 satisfied at the agent typed message-stream level (`tool_calls` / `ToolMessage` `status`) — the user-endorsed reading, with agent→SSE/CLI wiring deliberately deferred; criterion 4 evidence [`docs/contracts/2026-08-05.md`](contracts/2026-08-05.md) (opus + sonnet both `Supported`, opus with temperature omitted); 357 offline tests, `npm run typecheck` and `npm run build` pass; reviewed. No phase active; Phase 7 becomes the next proposed phase (not active until user-approved) |
 | 2026-08-05 | Phase 7 | Planned → Active (user-approved) | User-approved Phase 7 activation with approved design decisions and increment plan | No Phase 7 exit criteria met yet; increment plan 7a–7e and approved decisions (sqlite-vec on better-sqlite3; separate `KNOWLEDGE_DB_PATH` DB with Phase-5 versioned migrations; `gemini-embedding-001` @ 768 dims via `LITELLM_EMBED_MODEL`, gate met per [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md); app-owned content-hash IDs + deterministic chunking; trusted authorization/citation-ready metadata; offline fake-embedder tests + opt-in live retrieval eval) recorded above; Phase 8 becomes next proposed |
 | 2026-08-06 | Phase 7 | Active → Complete (user-approved; baseline thresholds approved; criterion-4 native-vs-truncated interpretation accepted) | User-approved Phase 7 closeout | All five Phase 7 exit criteria ticked above; 7a–7e Complete; approved retrieval baseline recall@k≥0.80/precision@k≥0.18/MRR≥0.70/nDCG@k≥0.75 met per [`docs/retrieval/2026-08-06.md`](retrieval/2026-08-06.md); crit-4 native-vs-truncated interpretation with regenerated [`docs/embeddings/2026-08-06.md`](embeddings/2026-08-06.md); 498 offline tests, `npm run typecheck` and `npm run build` pass; reviewed. No phase active; Phase 8 becomes next proposed (not active until user-approved) |
+| 2026-08-06 | Phase 8 | Planned → Active (user-approved) | User-approved Phase 8 activation with approved design decisions and increment plan | No Phase 8 exit criteria met yet; increment plan 8a–8d and approved decisions (deterministic two-step retrieve-then-generate; app-assigned citation markers resolved by app code to retrieved/authorized IDs, never from model text; Zod `GroundedAnswer` via `withStructuredOutput` reusing Phase 6 structured output incl. opus temp-omit, default `claude-sonnet-4-6`; retrieved content treated as untrusted data w/ prompt-injection guardrail; PURE/injected library not wired to service/CLI/SSE this phase; groundedness/citation eval thresholds PROPOSED pending user approval at closeout; agentic retrieval deferred via ADR) recorded above; Phase 9 becomes next proposed |
