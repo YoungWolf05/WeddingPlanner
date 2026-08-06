@@ -12,6 +12,8 @@ import {
   computeContentHash,
   computeChunkId,
   normalizeContent,
+  normalizeSourceUri,
+  InvalidSourceUriError,
   resolveKnowledgeDbPath,
   KNOWLEDGE_MIGRATIONS,
   DEFAULT_EMBEDDING_DIM,
@@ -205,30 +207,60 @@ describe("Phase 7 (7a) — knowledge store schema + migrations", () => {
     expect(storeB.listChunks(doc.documentId)).toHaveLength(1);
   });
 
-  it("CONTENT-HASH IDENTITY: document_id is deterministic for identical normalized content; differs for different content", () => {
+  it("SOURCE-ADDRESSED IDENTITY (7c): document_id = f(source_uri), INDEPENDENT of content; content_hash tracks content; normalizeSourceUri (NFC/trim, no case-fold); empty source rejected", () => {
     const store = makeStore();
 
-    // Identical normalized content (CRLF vs LF) -> identical document_id.
-    const idLf = computeDocumentId("line1\nline2");
-    const idCrlf = computeDocumentId("line1\r\nline2");
-    expect(idCrlf).toBe(idLf);
-    expect(computeContentHash("line1\r\nline2")).toBe(computeContentHash("line1\nline2"));
+    // document_id is derived from the SOURCE URI, not the content. Two different
+    // contents under the SAME source share ONE document_id.
+    const idA = computeDocumentId("kb://identity");
+    expect(computeDocumentId("kb://identity")).toBe(idA); // deterministic
 
-    // The stored document_id + content_hash match the pure helpers.
-    const doc = store.insertDocument({ content: "line1\r\nline2" });
-    expect(doc.documentId).toBe(idLf);
+    // Insert derives document_id from source_uri and content_hash from content.
+    const doc = store.insertDocument({
+      content: "line1\r\nline2",
+      sourceUri: "kb://identity",
+    });
+    expect(doc.documentId).toBe(idA);
     expect(doc.contentHash).toBe(computeContentHash("line1\nline2"));
+    // document_id (hash of source_uri) and content_hash (hash of content) are now
+    // genuinely DIFFERENT values — identity is decoupled from content.
+    expect(doc.documentId).not.toBe(doc.contentHash);
 
-    // Different content -> different id.
-    expect(computeDocumentId("something else")).not.toBe(idLf);
+    // DIFFERENT source_uri → DIFFERENT document_id (even with identical content).
+    expect(computeDocumentId("kb://other")).not.toBe(idA);
 
-    // normalizeContent is the single documented normalization.
+    // normalizeSourceUri: NFC + trim, NO case-folding.
+    //  - trim: surrounding whitespace does not change identity.
+    expect(computeDocumentId("  kb://identity  ")).toBe(idA);
+    expect(normalizeSourceUri("  kb://identity  ")).toBe("kb://identity");
+    //  - NFC: canonically-equivalent forms map to one identity. "é" as U+00E9
+    //    vs "e" + U+0301 combining accent normalize to the SAME id.
+    const precomposed = "kb://caf\u00e9";
+    const decomposed = "kb://cafe\u0301";
+    expect(normalizeSourceUri(decomposed)).toBe(precomposed.normalize("NFC"));
+    expect(computeDocumentId(decomposed)).toBe(computeDocumentId(precomposed));
+    //  - NO case-fold: case is significant (paths/URIs are case-sensitive).
+    expect(computeDocumentId("kb://Identity")).not.toBe(idA);
+
+    // Empty / whitespace-only source is REJECTED with a typed error, at both the
+    // pure helper and insertDocument, before any write.
+    expect(() => normalizeSourceUri("   ")).toThrow(InvalidSourceUriError);
+    expect(() => computeDocumentId("")).toThrow(InvalidSourceUriError);
+    expect(() =>
+      store.insertDocument({ content: "orphan content", sourceUri: "   " })
+    ).toThrow(InvalidSourceUriError);
+    // Nothing was persisted by the rejected insert.
+    expect(
+      (store.db.prepare(`SELECT COUNT(*) AS n FROM documents`).get() as { n: number }).n
+    ).toBe(1); // only the "kb://identity" doc above
+
+    // normalizeContent remains the single documented CONTENT normalization.
     expect(normalizeContent("a\r\nb\rc")).toBe("a\nb\nc");
   });
 
   it("UNIQUE / IDENTITY constraints: duplicate (document_id, chunk_index) is rejected; deterministic chunk_id", () => {
     const store = makeStore();
-    const doc = store.insertDocument({ content: "doc for chunks" });
+    const doc = store.insertDocument({ content: "doc for chunks", sourceUri: "kb://chunks" });
 
     const c0 = store.insertChunk({ documentId: doc.documentId, chunkIndex: 0, text: "chunk A" });
     // chunk_id matches the pure deterministic helper.
@@ -257,7 +289,7 @@ describe("Phase 7 (7a) — knowledge store schema + migrations", () => {
 
   it("DELETE-BY-DOCUMENT: cascades chunks and removes their vectors atomically", () => {
     const store = makeStore();
-    const doc = store.insertDocument({ content: "to be deleted" });
+    const doc = store.insertDocument({ content: "to be deleted", sourceUri: "kb://del" });
     const c0 = store.insertChunk({ documentId: doc.documentId, chunkIndex: 0, text: "a", embedding: fakeEmbedding(2) });
     store.insertChunk({ documentId: doc.documentId, chunkIndex: 1, text: "b", embedding: fakeEmbedding(3) });
 
@@ -283,7 +315,7 @@ describe("Phase 7 (7a) — knowledge store schema + migrations", () => {
 
   it("sqlite-vec: extension loads; a 768-dim vector inserts; a KNN query round-trips", () => {
     const store = makeStore();
-    const doc = store.insertDocument({ content: "vector doc" });
+    const doc = store.insertDocument({ content: "vector doc", sourceUri: "kb://vec" });
 
     // Store two chunks with distinct embeddings; one identical to the query.
     const near = fakeEmbedding(5);
@@ -302,7 +334,7 @@ describe("Phase 7 (7a) — knowledge store schema + migrations", () => {
 
   it("sqlite-vec: a wrong-dimension embedding is rejected (foundation for 7d)", () => {
     const store = makeStore();
-    const doc = store.insertDocument({ content: "dim doc" });
+    const doc = store.insertDocument({ content: "dim doc", sourceUri: "kb://dim" });
     // Store-level validation rejects a wrong-length embedding before touching the DB.
     expect(() =>
       store.insertChunk({
@@ -337,7 +369,7 @@ describe("Phase 7 (7a) — knowledge store schema + migrations", () => {
     const store = createKnowledgeStore({ dbPath, embeddingDim: 16 });
     openStores.push(store);
     expect(store.embeddingDim).toBe(16);
-    const doc = store.insertDocument({ content: "small dim" });
+    const doc = store.insertDocument({ content: "small dim", sourceUri: "kb://small" });
     const v = Float32Array.from({ length: 16 }, (_, i) => i / 16);
     store.insertChunk({ documentId: doc.documentId, chunkIndex: 0, text: "x", embedding: v });
     const hits = store.searchChunksByVector(v, 1);

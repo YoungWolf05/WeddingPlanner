@@ -37,8 +37,9 @@ describe("Phase 7 (7b) — chunking determinism + parameters", () => {
     const b = chunkText(content, { chunkSize: 40, chunkOverlap: 10 });
     expect(a).toEqual(b);
     // And the derived chunk_ids (the 7a scheme) are identical across runs — the
-    // property idempotent ingestion relies on.
-    const documentId = computeDocumentId(content);
+    // property idempotent ingestion relies on. The document_id is source-addressed
+    // (7c), so it is seeded from the source URI, not the content.
+    const documentId = computeDocumentId("kb://determinism");
     const idsA = a.map((text, i) =>
       computeChunkId(documentId, i, computeContentHash(text))
     );

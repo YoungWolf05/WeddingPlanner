@@ -1,40 +1,54 @@
 import { redactError, redactText } from "./redaction.js";
 import { createEmbeddingsModel, type EmbeddingsOptions } from "./embeddings.js";
 import { chunkText, type ChunkingOptions } from "./chunking.js";
-import { computeDocumentId, type KnowledgeStore } from "./knowledge-store.js";
+import {
+  computeContentHash,
+  computeDocumentId,
+  type KnowledgeStore,
+} from "./knowledge-store.js";
 
-// Phase 7 (7b): IDEMPOTENT INGESTION ORCHESTRATOR.
+// Phase 7 (7c): SOURCE-ADDRESSED UPSERT + UPDATE/DELETE INGESTION ORCHESTRATOR.
 //
 // WHAT THIS MODULE OWNS
 // ---------------------
-// The deterministic pipeline that turns a source (uri + raw content) into
-// normalized → chunked → embedded → persisted documents/chunks/vectors, and is a
-// NO-OP when the SAME content is ingested again (Phase 7 exit criterion 1).
+// The deterministic pipeline that turns a source (REQUIRED uri + raw content)
+// into normalized → chunked → embedded → persisted documents/chunks/vectors, now
+// with first-class UPDATE and DELETE folded into identity (Phase 7 exit criteria
+// 1 and 2). Identity is the SOURCE; content is its VERSION.
 //
-// PIPELINE
-//   1. Compute the content-addressed `document_id` from `content` (reusing the
-//      7a `computeDocumentId`, which normalizes + SHA-256 hashes) — never a
-//      caller/model id.
-//   2. IDEMPOTENCY CHECK: if a document with that id already exists, return
-//      `unchanged` immediately. The embedder is NOT called and NOTHING is
-//      written (this is what makes re-ingestion cheap AND duplicate-free).
-//   3. Otherwise chunk the content deterministically (`chunkText`), embed the
-//      chunks through the INJECTED embedder, DIMENSION-GUARD every vector, then
-//      persist the document + chunks + vectors in ONE transaction.
+// UPSERT-BY-SOURCE STATE MACHINE
+//   1. Compute the SOURCE-addressed `document_id = computeDocumentId(sourceUri)`
+//      (7a helper, now hashing the normalized source_uri) and the content
+//      VERSION hash `newContentHash = computeContentHash(content)`.
+//   2. Look up the document by that id:
+//      - NOT FOUND                         → CREATE  (chunk→embed→persist), "created".
+//      - FOUND, stored hash == new hash     → UNCHANGED (no chunk, no embed, no
+//                                             write), "unchanged".
+//      - FOUND, stored hash != new hash     → UPDATE IN PLACE: chunk→embed, then in
+//                                             ONE transaction delete the old
+//                                             chunks+vectors, insert the new ones,
+//                                             and bump the document's content_hash +
+//                                             updated_at (created_at preserved),
+//                                             "updated".
+//   3. EMPTY / whitespace-only content chunks to ZERO chunks → "skipped": the
+//      embedder is called ZERO times, NOTHING is written, and an EXISTING
+//      document for that source is left UNTOUCHED (a skip must never wipe
+//      content — explicit removal is the delete API, not an empty re-ingest).
 //
-// IDENTITY / DEDUP SEMANTICS (documented, from 7a)
-//   Identity is CONTENT-ADDRESSED: `document_id == sha256(normalizeContent)`.
-//   `source_uri` is metadata ONLY and is NOT part of identity, so two DIFFERENT
-//   source URIs carrying byte-for-byte identical normalized content dedupe to
-//   ONE document by design. Conversely, genuinely NEW content yields a NEW
-//   document_id and a fresh insert.
+// IDENTITY / UPDATE SEMANTICS (documented, 7c source-addressed)
+//   `document_id == sha256(normalizeSourceUri(source_uri))`, INDEPENDENT of
+//   content. Two DIFFERENT source URIs with byte-identical content are TWO
+//   distinct documents (no content dedup). The SAME source re-ingested with
+//   changed content is an in-place UPDATE of the SAME document_id (full chunk
+//   REPLACE, not diff, for determinism). This SUPERSEDES the 7a/7b
+//   content-addressed model.
+//
+// DELETE API
+//   `deleteDocument(store, documentId)` / `deleteSource(store, sourceUri)` are
+//   thin, typed, atomic removals (document + all chunks + all vec0 vectors).
+//   Deleting a nonexistent document/source is a clean no-op returning false.
 //
 // SCOPE BOUNDARY (deferred; do NOT implement here)
-//   - 7c: update/delete semantics when the SAME `source_uri` is re-ingested with
-//     CHANGED content (which produces a NEW content-addressed document_id, i.e. a
-//     new document). 7b intentionally does NOT reconcile/replace the prior
-//     document for that URI or delete stale chunks. TODO(7c): add source-URI
-//     replacement / stale-document reconciliation here.
 //   - 7d: LIVE embedding + full embedding-model/dimension COMPATIBILITY policy.
 //     The dimension guard below is only a local vector-length check.
 //   - 7e: retriever/ranking, eval, curated corpus.
@@ -49,26 +63,29 @@ export interface DocumentEmbedder {
 }
 
 // Discriminated ingestion result:
-//   - `created`   = a new document (+ its chunks and vectors) was persisted.
-//   - `unchanged` = an identical content-addressed document already existed and
-//                   ingestion was a no-op (nothing written, embedder not called).
-//                   This ALSO covers the concurrent-first-ingest race where two
-//                   ingests of identical NEW content run at once: exactly one
-//                   wins the insert (`created`) and the loser resolves cleanly to
-//                   `unchanged` against the persisted document (see FIX A below).
+//   - `created`   = a new source's document (+ its chunks and vectors) was
+//                   persisted. Also the winner of a concurrent first-ingest race
+//                   for the same NEW source (see FIX A below).
+//   - `unchanged` = the source already existed and its stored content_hash
+//                   equals the new content's hash, so ingestion was a no-op
+//                   (nothing written, embedder NOT called).
+//   - `updated`   = the source already existed with DIFFERENT content, so its
+//                   chunks + vectors were fully REPLACED and the document row's
+//                   content_hash + updated_at were bumped in ONE transaction
+//                   (created_at preserved). `chunkCount` is the NEW chunk count.
 //   - `skipped`   = the normalized content is empty or whitespace-only, so it
-//                   chunks to ZERO chunks. NOTHING is persisted (no document,
-//                   chunk, or vector row) and the embedder is NOT called. This is
-//                   a deliberate product decision (see FIX B below): a zero-chunk
-//                   document is unretrievable dead weight, so we refuse to mint
-//                   one. Re-ingesting the same empty content is still `skipped`
-//                   (idempotent) and still writes nothing.
-// `documentId` is the content-addressed id in ALL cases (computed even when
-// skipped, so callers can correlate). `chunkCount` is the number of persisted
-// chunks — always 0 for `skipped`.
+//                   chunks to ZERO chunks. NOTHING is persisted and the embedder
+//                   is NOT called. A skip NEVER wipes an existing document for
+//                   that source (explicit removal is the delete API). For a brand
+//                   new source `chunkCount` is 0; when skipping over an EXISTING
+//                   document it reports that document's current (unchanged) chunk
+//                   count.
+// `documentId` is the SOURCE-addressed id in ALL cases (computed even when
+// skipped, so callers can correlate).
 export type IngestResult =
   | { status: "created"; documentId: string; chunkCount: number }
   | { status: "unchanged"; documentId: string; chunkCount: number }
+  | { status: "updated"; documentId: string; chunkCount: number }
   | { status: "skipped"; documentId: string; chunkCount: number };
 
 /**
@@ -129,9 +146,12 @@ export class EmbeddingCountError extends Error {
  * so no raw better-sqlite3 string (SQL text, bound values) can leak to a log or
  * caller, honoring the always-on redaction convention.
  *
- * NOTE: the EXPECTED race (identical NEW content ingested concurrently) is NOT
- * an error — it resolves to `{ status: "unchanged" }` (see {@link ingestDocument}
- * FIX A). This error is only for a constraint failure that stays unexplained.
+ * NOTE: 7c makes the create-vs-update DECISION atomically INSIDE the write
+ * transaction (a re-read on the single, synchronous connection), so a concurrent
+ * ingest of the same source converges deterministically WITHOUT a constraint
+ * race — the winner CREATEs and the follower sees the row and resolves to
+ * `unchanged`/`updated`. This error is defense-in-depth for a constraint failure
+ * that STILL surfaces and does not resolve to an existing document.
  */
 export class IngestionWriteError extends Error {
   constructor(cause: unknown) {
@@ -150,7 +170,7 @@ export class IngestionWriteError extends Error {
 // beginning with `SQLITE_CONSTRAINT` (e.g. `SQLITE_CONSTRAINT_PRIMARYKEY` for a
 // duplicate documents PK, `SQLITE_CONSTRAINT_UNIQUE` for a duplicate
 // (document_id, chunk_index)). We match ONLY that family so unrelated errors are
-// never mistaken for the idempotency race.
+// never mistaken for a benign convergence race.
 function isSqliteConstraintError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -167,10 +187,12 @@ export interface IngestDocumentOptions {
   store: KnowledgeStore;
   // The injected embedder (production adapter or a test fake).
   embedder: DocumentEmbedder;
-  // Raw source content; normalized + hashed internally for identity.
+  // Raw source content; normalized + hashed internally as the content VERSION.
   content: string;
-  // Provenance metadata only (NOT identity). Defaults to null.
-  sourceUri?: string | null;
+  // REQUIRED (7c): the source IS identity. Normalized + validated via
+  // normalizeSourceUri; document_id is derived from it. Empty/whitespace-only
+  // throws InvalidSourceUriError (before any embed or write).
+  sourceUri: string;
   // Authorization-ready owner metadata (nullable now; 7a schema column).
   ownerId?: string | null;
   // Injectable chunking parameters; omitted fields use the documented defaults.
@@ -178,36 +200,52 @@ export interface IngestDocumentOptions {
 }
 
 /**
- * Ingest ONE document idempotently.
+ * Ingest ONE source, upserting BY SOURCE (7c).
  *
- * Returns `{ status: "unchanged" }` (calling the embedder ZERO times and writing
- * nothing) when a document with the same content-addressed id already exists.
- * Returns `{ status: "skipped" }` (again embedder-free and writing nothing) when
- * the content is empty/whitespace-only and therefore chunks to zero chunks —
- * minting a zero-chunk document is a deliberate NON-decision (FIX B). Otherwise
- * chunks, embeds, dimension-guards, and persists the document + chunks + vectors
- * in a single transaction and returns `{ status: "created" }`.
+ * State machine on `document_id = computeDocumentId(sourceUri)` (source-addressed):
+ *   - NOT FOUND                     → CREATE, `{ status: "created" }`.
+ *   - FOUND, content hash unchanged → NO-OP, `{ status: "unchanged" }` (embedder
+ *                                     NOT called, nothing written).
+ *   - FOUND, content hash changed   → UPDATE IN PLACE, `{ status: "updated" }`:
+ *                                     old chunks+vectors deleted and new ones
+ *                                     inserted with the document row's
+ *                                     content_hash + updated_at bumped, all in
+ *                                     ONE transaction (created_at preserved,
+ *                                     full REPLACE not diff).
+ *   - EMPTY / whitespace content    → `{ status: "skipped" }`: embedder-free,
+ *                                     nothing written, and an EXISTING document
+ *                                     for that source is left UNTOUCHED (a skip
+ *                                     never wipes content).
  *
- * CONCURRENCY (FIX A): the existence check and the embed step are separated by an
- * `await`, so two concurrent ingests of identical NEW content can both pass the
- * check and both reach the insert. The UNIQUE/PK constraints guarantee only one
- * physically wins; the loser catches the SQLITE_CONSTRAINT violation, re-reads
- * the now-persisted document, and resolves to `{ status: "unchanged" }` using the
- * STORE as the source of truth for `chunkCount`. Non-constraint errors are never
- * swallowed — they propagate (the atomic transaction rolls back cleanly first).
+ * CONCURRENCY (FIX A, 7c-adapted): the existence check and the embed are
+ * separated by an `await`, so two concurrent ingests of the SAME source can both
+ * embed. The create-vs-update DECISION and the write are then made TOGETHER
+ * inside ONE `store.db.transaction()`, which re-reads the freshest committed
+ * state. Because better-sqlite3 is a synchronous single connection, transactions
+ * are fully serialized: the first writer CREATEs; the follower re-reads, sees the
+ * row, and resolves to `unchanged` (identical content) or `updated` (different
+ * content) — never a duplicate, never an orphan, never a raw constraint error. A
+ * SQLITE_CONSTRAINT that still somehow surfaces is caught and, if it resolves to
+ * an existing document, reported idempotently; otherwise re-thrown as a TYPED,
+ * REDACTED {@link IngestionWriteError}. Non-constraint errors propagate (the
+ * atomic transaction has already rolled back cleanly).
  */
 export async function ingestDocument(
   options: IngestDocumentOptions
 ): Promise<IngestResult> {
   const { store, embedder, content } = options;
-  const documentId = computeDocumentId(content);
+  // (1) SOURCE-addressed identity (7c). computeDocumentId validates + normalizes
+  // the REQUIRED source_uri and throws InvalidSourceUriError on empty — BEFORE
+  // any embed or write. content_hash is the SEPARATE content VERSION marker.
+  const documentId = computeDocumentId(options.sourceUri);
+  const newContentHash = computeContentHash(content);
 
-  // (2) IDEMPOTENCY: content-addressed identity check. If the document already
-  // exists, this is a strict no-op — DO NOT chunk, DO NOT call the embedder, DO
-  // NOT write. This is the core of exit criterion 1 (no duplicate documents or
-  // chunks on re-ingest) and the reason re-ingestion incurs no embedding cost.
+  // (2) UNCHANGED fast-path: if the source already exists AND its stored content
+  // hash equals the new content's hash, this is a strict no-op — DO NOT chunk,
+  // DO NOT call the embedder, DO NOT write. This is what keeps re-ingesting the
+  // same source cheap (no embedding cost) and duplicate-free.
   const existing = store.getDocument(documentId);
-  if (existing !== null) {
+  if (existing !== null && existing.contentHash === newContentHash) {
     return {
       status: "unchanged",
       documentId,
@@ -215,23 +253,28 @@ export async function ingestDocument(
     };
   }
 
-  // (3) New content: chunk deterministically. `chunkText` normalizes internally
-  // with the SAME normalization used to derive the id, so boundaries are stable.
+  // (3) CREATE or UPDATE: chunk deterministically. `chunkText` normalizes
+  // internally with the SAME normalization used to derive the content hash, so
+  // boundaries are stable.
   const chunks = chunkText(content, options.chunking);
 
-  // FIX B (product decision): empty or whitespace-only content normalizes to
-  // zero chunks. Do NOT call the embedder and do NOT persist ANYTHING — a
-  // zero-chunk document is permanently unretrievable and would only accrete dead
-  // rows for 7c/7e to carry. Report it explicitly as `skipped` (idempotent: the
-  // next ingest of the same empty content re-computes zero chunks and skips
-  // again, having written nothing).
+  // SKIP (product decision): empty or whitespace-only content normalizes to zero
+  // chunks. Do NOT call the embedder and do NOT persist ANYTHING — a zero-chunk
+  // document is permanently unretrievable. Crucially, a skip NEVER mutates or
+  // deletes an EXISTING document for this source: wiping content is the explicit
+  // job of the delete API, not of an empty re-ingest. Report `skipped`,
+  // reflecting the existing (unchanged) chunk count when a document is present.
   if (chunks.length === 0) {
-    return { status: "skipped", documentId, chunkCount: 0 };
+    return {
+      status: "skipped",
+      documentId,
+      chunkCount: existing !== null ? store.listChunks(documentId).length : 0,
+    };
   }
 
   // Embed the chunks (order-preserving), then contract- and dimension-guard the
   // vectors BEFORE opening the write transaction, so a bad embedder response
-  // persists NOTHING (no partial document/chunks/vectors).
+  // persists NOTHING (no partial document/chunks/vectors on either path).
   const vectors: number[][] = await embedder.embedDocuments(chunks);
   if (vectors.length !== chunks.length) {
     throw new EmbeddingCountError(chunks.length, vectors.length);
@@ -242,42 +285,64 @@ export async function ingestDocument(
     }
   }
 
-  // Persist document + chunks + vectors ATOMICALLY. Nested store primitives run
-  // as savepoints inside this outer transaction, so any failure (including the
-  // store's own defense-in-depth dimension check inside insertChunk) rolls the
-  // WHOLE thing back — no orphaned document, chunks, or vectors. The store's
-  // UNIQUE(document_id, chunk_index) makes a duplicate chunk index impossible.
-  try {
-    store.db.transaction(() => {
-      store.insertDocument({
-        content,
-        sourceUri: options.sourceUri ?? null,
-        ownerId: options.ownerId ?? null,
+  const insertChunks = (): void => {
+    for (let index = 0; index < chunks.length; index++) {
+      store.insertChunk({
+        documentId,
+        chunkIndex: index,
+        text: chunks[index]!,
+        embedding: vectors[index],
       });
-      for (let index = 0; index < chunks.length; index++) {
-        store.insertChunk({
-          documentId,
-          chunkIndex: index,
-          text: chunks[index]!,
-          embedding: vectors[index],
+    }
+  };
+
+  // Persist ATOMICALLY. The create-vs-update decision is made INSIDE the
+  // transaction on a FRESH read (`store.getDocument`), so on the single,
+  // synchronous connection it is race-free: nested store primitives run as
+  // savepoints, and any failure rolls the WHOLE thing back — no orphaned or
+  // duplicate document/chunks/vectors. Full chunk REPLACE (delete-all-then-
+  // insert) keeps the update deterministic.
+  try {
+    return store.db.transaction((): IngestResult => {
+      const current = store.getDocument(documentId);
+      if (current === null) {
+        // CREATE: brand-new source.
+        store.insertDocument({
+          content,
+          sourceUri: options.sourceUri,
+          ownerId: options.ownerId ?? null,
         });
+        insertChunks();
+        return { status: "created", documentId, chunkCount: chunks.length };
       }
+      if (current.contentHash === newContentHash) {
+        // A concurrent writer already produced identical content between our
+        // pre-embed read and here: converge to a no-op.
+        return {
+          status: "unchanged",
+          documentId,
+          chunkCount: store.listChunks(documentId).length,
+        };
+      }
+      // UPDATE IN PLACE: full replace — drop old chunks+vectors, bump the
+      // document's content_hash + updated_at (created_at preserved), insert new.
+      store.deleteChunks(documentId);
+      store.touchDocumentContent(documentId, content);
+      insertChunks();
+      return { status: "updated", documentId, chunkCount: chunks.length };
     })();
   } catch (err) {
-    // FIX A: a SQLITE_CONSTRAINT violation here means a CONCURRENT ingest of
-    // identical content won the race and already persisted this exact document
-    // (documents PK / chunks UNIQUE(document_id, chunk_index)). Resolve to the
-    // idempotent outcome using the STORE as the source of truth — never the
-    // loser's local `chunks` array. If the document did NOT materialize, this is
-    // an unexpected constraint failure: rethrow as a TYPED, REDACTED error so no
-    // raw driver string leaks. Any NON-constraint error is unrelated and must
-    // propagate (the transaction has already rolled back atomically, so the
-    // store is clean); store-originated errors are already redacted.
+    // Defense-in-depth: a SQLITE_CONSTRAINT that still surfaces despite the
+    // in-transaction decision means a concurrent writer already persisted this
+    // source. Resolve idempotently using the STORE as source of truth; if the
+    // document did NOT materialize, rethrow as a TYPED, REDACTED error so no raw
+    // driver string leaks. Any NON-constraint error propagates (the transaction
+    // has already rolled back atomically; store-originated errors are redacted).
     if (isSqliteConstraintError(err)) {
       const persisted = store.getDocument(documentId);
       if (persisted !== null) {
         return {
-          status: "unchanged",
+          status: persisted.contentHash === newContentHash ? "unchanged" : "updated",
           documentId,
           chunkCount: store.listChunks(documentId).length,
         };
@@ -286,14 +351,12 @@ export async function ingestDocument(
     }
     throw err;
   }
-
-  return { status: "created", documentId, chunkCount: chunks.length };
 }
 
-// One entry for a batch ingestion.
+// One entry for a batch ingestion. `sourceUri` is REQUIRED (7c identity).
 export interface IngestDocumentInput {
   content: string;
-  sourceUri?: string | null;
+  sourceUri: string;
   ownerId?: string | null;
 }
 
@@ -322,13 +385,45 @@ export async function ingestDocuments(
         store: options.store,
         embedder: options.embedder,
         content: doc.content,
-        sourceUri: doc.sourceUri ?? null,
+        sourceUri: doc.sourceUri,
         ownerId: doc.ownerId ?? null,
         chunking: options.chunking,
       })
     );
   }
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// DELETE API (7c). Thin, typed, atomic removals for callers. Each removes the
+// document, ALL of its chunks, and ALL of their vec0 vectors in one transaction
+// (the store primitives guarantee zero orphan vectors). Deleting something that
+// does not exist is a clean no-op returning false.
+// ---------------------------------------------------------------------------
+
+/**
+ * Delete a document (and its chunks + vectors) by its app-owned `documentId`.
+ * Returns true if a document was removed, false if there was no such document.
+ * Atomic and deterministic (delegates to the store's cascading hard delete).
+ */
+export function deleteDocument(
+  store: KnowledgeStore,
+  documentId: string
+): boolean {
+  return store.deleteDocument(documentId);
+}
+
+/**
+ * Delete the document owning `sourceUri` (7c source-scoped delete), plus its
+ * chunks + vectors. Returns true if removed, false if no document exists for that
+ * source. Throws InvalidSourceUriError on an empty/whitespace-only source (the
+ * source is identity and must be well-formed even to address a delete).
+ */
+export function deleteSource(
+  store: KnowledgeStore,
+  sourceUri: string
+): boolean {
+  return store.deleteDocumentBySource(sourceUri);
 }
 
 /**

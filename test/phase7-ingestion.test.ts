@@ -168,7 +168,7 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
     });
 
     expect(result.status).toBe("created");
-    expect(result.documentId).toBe(computeDocumentId(LONG_CONTENT));
+    expect(result.documentId).toBe(computeDocumentId("kb://guide"));
     expect(result.chunkCount).toBeGreaterThan(1);
 
     // Exactly one document; N chunks; N vectors.
@@ -223,12 +223,13 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
     expect(docsAfterFirst).toBe(1);
     expect(embedderCallsAfterFirst).toBe(1);
 
-    // Re-ingest the SAME content (even via a DIFFERENT source_uri).
+    // Re-ingest the SAME source_uri with the SAME content (7c: identity is the
+    // source, so an unchanged re-ingest MUST reuse the source URI).
     const second = await ingestDocument({
       store,
       embedder,
       content: LONG_CONTENT,
-      sourceUri: "kb://different-uri",
+      sourceUri: "kb://guide",
       chunking,
     });
 
@@ -246,7 +247,7 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
     expect(embedder.callCount).toBe(embedderCallsAfterFirst);
   });
 
-  it("DISTINCT contents → two documents; identical normalized content from a DIFFERENT source_uri dedupes to ONE (content-addressed identity)", async () => {
+  it("SOURCE-ADDRESSED IDENTITY (7c headline): two DIFFERENT source_uris with IDENTICAL content → TWO distinct documents (no content collision); SAME source_uri → SAME document_id", async () => {
     const store = makeStore();
     const embedder = makeFakeEmbedder();
 
@@ -267,23 +268,37 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
     expect(a.documentId).not.toBe(b.documentId);
     expect(countDocuments(store)).toBe(2);
 
-    // DOCUMENTED BEHAVIOR: identity is content-addressed, NOT uri-addressed.
-    // Content that is byte-identical AFTER normalization (here a CRLF variant of
-    // `a`) from a DIFFERENT uri dedupes to the SAME single document — no third
-    // document is created.
-    const dedup = await ingestDocument({
+    // HEADLINE 7c BEHAVIOR: identity is SOURCE-addressed, NOT content-addressed.
+    // Byte-identical content (here a CRLF variant of `a`) under a DIFFERENT
+    // source_uri is a genuinely DIFFERENT document — NO collision, NO dedup.
+    const twin = await ingestDocument({
       store,
       embedder,
       content: "First distinct document.\r\nWith two lines.",
       sourceUri: "kb://a-mirror",
     });
-    // Same content → same id → unchanged no-op.
-    expect(dedup.status).toBe("unchanged");
-    expect(dedup.documentId).toBe(a.documentId);
-    expect(countDocuments(store)).toBe(2);
+    expect(twin.status).toBe("created");
+    expect(twin.documentId).not.toBe(a.documentId);
+    expect(twin.documentId).toBe(computeDocumentId("kb://a-mirror"));
+    // THREE distinct documents now persist (a, b, a-mirror), each with its own id.
+    expect(countDocuments(store)).toBe(3);
+    const ids = new Set([a.documentId, b.documentId, twin.documentId]);
+    expect(ids.size).toBe(3);
+
+    // Same source_uri → SAME document_id → re-ingesting identical content is a
+    // no-op (unchanged), not a new row.
+    const again = await ingestDocument({
+      store,
+      embedder,
+      content: "First distinct document.\nWith two lines.",
+      sourceUri: "kb://a",
+    });
+    expect(again.status).toBe("unchanged");
+    expect(again.documentId).toBe(a.documentId);
+    expect(countDocuments(store)).toBe(3);
   });
 
-  it("NEW content yields a NEW document (changed-content-same-URI replacement is deferred to 7c)", async () => {
+  it("UPDATE IN PLACE (7c): re-ingesting the SAME source with CHANGED content updates the SAME document_id (content_hash changes), not a new row", async () => {
     const store = makeStore();
     const embedder = makeFakeEmbedder();
 
@@ -293,9 +308,9 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
       content: "Venue shortlist version one.",
       sourceUri: "kb://venues",
     });
-    // Genuinely NEW content on the SAME uri → a NEW content-addressed document.
-    // 7b does NOT replace/delete the prior document (that is 7c); it simply adds
-    // the new one. This asserts the 7b scope boundary explicitly.
+    // CHANGED content on the SAME source_uri → in-place UPDATE of the SAME
+    // document (7c), NOT a second document. document_id is stable; content_hash
+    // moves to the new version.
     const v2 = await ingestDocument({
       store,
       embedder,
@@ -303,9 +318,13 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
       sourceUri: "kb://venues",
     });
     expect(v1.status).toBe("created");
-    expect(v2.status).toBe("created");
-    expect(v2.documentId).not.toBe(v1.documentId);
-    expect(countDocuments(store)).toBe(2);
+    expect(v2.status).toBe("updated");
+    expect(v2.documentId).toBe(v1.documentId);
+    expect(countDocuments(store)).toBe(1);
+
+    const doc = store.getDocument(v2.documentId)!;
+    expect(doc.contentHash).toBe(computeContentHash("Venue shortlist version TWO, revised."));
+    expect(doc.contentHash).not.toBe(computeContentHash("Venue shortlist version one."));
   });
 
   it("DIMENSION MISMATCH: a wrong-length embedding → typed EmbeddingDimensionError and NOTHING persisted (transactional rollback / pre-write guard)", async () => {
@@ -371,7 +390,7 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
     });
     expect(first.status).toBe("skipped");
     expect(first.chunkCount).toBe(0);
-    expect(first.documentId).toBe(computeDocumentId("   \n\n  \t "));
+    expect(first.documentId).toBe(computeDocumentId("kb://empty"));
     // NOTHING persisted: no document, chunk, or vector rows.
     expect(countDocuments(store)).toBe(0);
     expect(countChunks(store)).toBe(0);
@@ -415,8 +434,8 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
       documents: [
         { content: "Doc one body.", sourceUri: "kb://1" },
         { content: "Doc two body.", sourceUri: "kb://2" },
-        // A duplicate of doc one → unchanged no-op.
-        { content: "Doc one body.", sourceUri: "kb://1-again" },
+        // Re-ingest of the SAME source with the SAME content → unchanged no-op.
+        { content: "Doc one body.", sourceUri: "kb://1" },
       ],
     });
 
@@ -431,11 +450,12 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
     expect(embedder.callCount).toBe(2);
   });
 
-  it("CONCURRENT first-ingest of IDENTICAL new content: one 'created', one 'unchanged' — no duplicate rows, no raw constraint error (FIX A)", async () => {
+  it("CONCURRENT first-ingest of the SAME new source: one 'created', one 'unchanged' — no duplicate rows, no raw constraint error (FIX A, 7c)", async () => {
     const store = makeStore();
     // A GATED embedder forces BOTH ingests to park at the embed await together,
     // so both pass the pre-embed existence check (nothing is persisted yet) and
-    // both then attempt the insert — deterministically exercising the race.
+    // both then attempt the write — deterministically exercising the race. Under
+    // 7c source-addressed identity, both MUST target the SAME source_uri.
     const embedder = makeGatedEmbedder();
     const chunking = { chunkSize: 60, chunkOverlap: 15 };
 
@@ -443,14 +463,14 @@ describe("Phase 7 (7b) — idempotent ingestion", () => {
       store,
       embedder,
       content: LONG_CONTENT,
-      sourceUri: "kb://writer-a",
+      sourceUri: "kb://race",
       chunking,
     });
     const p2 = ingestDocument({
       store,
       embedder,
       content: LONG_CONTENT,
-      sourceUri: "kb://writer-b",
+      sourceUri: "kb://race",
       chunking,
     });
 
