@@ -365,6 +365,56 @@ describe("Phase 7 (7a) — knowledge store schema + migrations", () => {
     expect(reopened.embeddingDim).toBe(768);
   });
 
+  it("CONFIG-DEFAULTED DIMENSION (7d): the store defaults its dimension from config.embedDim; an explicit override still wins", () => {
+    // 7d wires config.embedDim (the single source of truth, LITELLM_EMBED_DIM ->
+    // 768 default) into createKnowledgeStore's default so the store dimension,
+    // the compatibility expectation, and the probe all read ONE value. Capture/
+    // restore config.embedDim so the test is hermetic (mirrors the config.
+    // knowledgeDbPath capture/restore pattern above).
+    const prior = config.embedDim;
+    try {
+      // A fresh store with NO explicit embeddingDim picks up config.embedDim.
+      config.embedDim = 32;
+      const defaulted = createKnowledgeStore({ dbPath });
+      openStores.push(defaulted);
+      expect(defaulted.embeddingDim).toBe(32);
+      const meta = defaulted.db
+        .prepare(`SELECT value FROM knowledge_meta WHERE key = 'embedding_dim'`)
+        .get() as { value: string };
+      expect(Number(meta.value)).toBe(32);
+
+      // An explicit override STILL wins over config.embedDim (back-compat), on a
+      // SEPARATE fresh file.
+      const otherPath = path.join(tempDir, "override-knowledge.sqlite");
+      const overridden = createKnowledgeStore({ dbPath: otherPath, embeddingDim: 24 });
+      openStores.push(overridden);
+      expect(overridden.embeddingDim).toBe(24);
+    } finally {
+      config.embedDim = prior;
+    }
+  });
+
+  it("CONFIG-DEFAULTED DIMENSION (7d): the reopen-mismatch guard still fires against the config default", () => {
+    // Build at the default (config.embedDim = 768 in the offline env), then
+    // reopen while config.embedDim has changed: the recorded dimension WINS and
+    // the mismatch throws loudly — the store enforces compatibility regardless of
+    // where the requested dimension comes from.
+    const built = makeStore();
+    expect(built.embeddingDim).toBe(768);
+    built.close();
+    openStores.length = 0; // already closed; avoid double-close in afterEach
+
+    const prior = config.embedDim;
+    try {
+      config.embedDim = 256; // as if the operator changed LITELLM_EMBED_DIM
+      expect(() => createKnowledgeStore({ dbPath })).toThrow(
+        /embedding-dimension mismatch/i
+      );
+    } finally {
+      config.embedDim = prior;
+    }
+  });
+
   it("CUSTOM DIMENSION: a store built at a non-default dimension round-trips a vector at that size", () => {
     const store = createKnowledgeStore({ dbPath, embeddingDim: 16 });
     openStores.push(store);

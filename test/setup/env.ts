@@ -20,6 +20,14 @@
 // to let config.ts load — no network call is ever made with them.
 process.env.LITELLM_BASE_URL = "http://localhost:0/test-fake-litellm";
 process.env.LITELLM_API_KEY = "sk-test-dummy-not-a-real-key";
-// Leave LITELLM_MODEL unset so config.ts exercises its documented default
-// (claude-sonnet-4-6). Individual tests override the model where relevant.
+// Leave LITELLM_MODEL, LITELLM_EMBED_MODEL, and LITELLM_EMBED_DIM unset so
+// config.ts exercises its documented defaults (model -> claude-sonnet-4-6;
+// embedModel -> undefined; embedDim -> 768). We delete them (rather than merely
+// leave them alone) so the offline suite stays deterministic even when a
+// developer/CI shell or .env has them set in the surrounding environment —
+// otherwise an ambient LITELLM_EMBED_DIM/LITELLM_EMBED_MODEL would break the
+// config.embedDim / config.embedModel / store-default-dimension assertions.
+// Individual tests override the model where relevant.
 delete process.env.LITELLM_MODEL;
+delete process.env.LITELLM_EMBED_DIM;
+delete process.env.LITELLM_EMBED_MODEL;

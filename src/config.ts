@@ -11,6 +11,50 @@ function required(name: string): string {
   return value.trim();
 }
 
+// Phase 7 (7d): the default expected embedding vector dimension when
+// LITELLM_EMBED_DIM is unset. 768 matches the verified gemini-embedding-001
+// alias (docs/capabilities/2026-07-28.md) and MUST stay in lockstep with
+// DEFAULT_EMBEDDING_DIM in src/core/knowledge-store.ts — a coupling asserted by
+// an offline test. Kept as a plain literal here (not imported from
+// knowledge-store.ts) because knowledge-store.ts imports THIS module, and a
+// cyclic import would be fragile.
+export const DEFAULT_EMBED_DIM = 768;
+
+// Parse LITELLM_EMBED_DIM into a positive-integer expected embedding dimension.
+// This is the SINGLE source of truth for the dimension the knowledge store is
+// built with AND the dimension the embedding alias must produce (7d
+// compatibility checks). Rules, mirroring createKnowledgeStore's own dimension
+// validation:
+//   - unset / empty / whitespace-only  -> DEFAULT_EMBED_DIM (768) fallback.
+//   - a positive integer               -> that value.
+//   - anything else (non-numeric, zero, negative, non-integer) -> FAIL LOUD.
+// It fails loud (rather than silently falling back) on a present-but-invalid
+// value so an operator typo can never silently build the store at the wrong
+// dimension; this matches the `required()` fail-loud spirit and the store's
+// "must be a positive integer" guard. Exported pure so it is unit-testable
+// without mutating process.env.
+export function parseEmbedDim(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return DEFAULT_EMBED_DIM;
+  // Accept ONLY a plain decimal non-negative integer string. `Number()` would
+  // otherwise treat hex ("0x10"), exponent ("1e3"), and other non-decimal forms
+  // as valid, contradicting the "must be a positive integer" contract below.
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(
+      `Invalid LITELLM_EMBED_DIM "${raw}": must be a positive integer ` +
+        `(the expected embedding vector dimension).`
+    );
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `Invalid LITELLM_EMBED_DIM "${raw}": must be a positive integer ` +
+        `(the expected embedding vector dimension).`
+    );
+  }
+  return parsed;
+}
+
 export const config = {
   baseURL: required("LITELLM_BASE_URL"),
   apiKey: required("LITELLM_API_KEY"),
@@ -20,6 +64,14 @@ export const config = {
   // records embeddings as "N/A — no embedding alias configured" rather than
   // failing; it never assumes a chat alias supports embeddings.
   embedModel: process.env.LITELLM_EMBED_MODEL?.trim() || undefined,
+  // Phase 7 (7d): the EXPECTED embedding vector dimension — the SINGLE source of
+  // truth read by the knowledge store (its recorded/built dimension), the 7d
+  // compatibility expectation, and the live embedding probe. Sourced from
+  // LITELLM_EMBED_DIM; defaults to DEFAULT_EMBED_DIM (768) when unset, and fails
+  // loud on a present-but-invalid value (see parseEmbedDim). Unlike the chat/
+  // embed aliases this is NEVER undefined: an absent env yields the 768 default,
+  // preserving full backward-compatibility for the store's prior 768 fallback.
+  embedDim: parseEmbedDim(process.env.LITELLM_EMBED_DIM),
   // Phase 5 (5a): filesystem path to the durable LangGraph SQLite checkpoint
   // database. Deliberately NOT under the LITELLM_* namespace — it configures
   // local persistence, not the provider. Optional; when unset, the checkpointer

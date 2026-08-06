@@ -34,6 +34,7 @@ npm run build                    # compile to dist/
 npm run test:connection          # verify LiteLLM reachability — run first after setup
 npm run test:capabilities        # probe the chat/embedding capability matrix -> docs/capabilities/<date>.md
 npm run test:contracts           # Phase 6 (6d) probe per-alias tool-call + structured-output contract -> docs/contracts/<date>.md
+npm run test:embedding           # Phase 7 (7d) verify the embedding alias + vector dimension through the proxy -> docs/embeddings/<date>.md
 npm run eval                     # run the wedding-planning eval dataset -> docs/eval/<date>.md
 npm run serve                    # LIVE local durable conversation service (Phase 5); binds SERVICE_PORT on 127.0.0.1
 ```
@@ -48,9 +49,9 @@ entrypoint is never imported by the suite.
 
 `npm test` is fully OFFLINE and CI-safe: the model boundary (`createChatModel`)
 is mocked per test, so no credentials or network are used. `test:connection`,
-`test:capabilities`, `test:contracts`, and `eval` are LIVE, opt-in commands that
-call the real proxy and are never run by `npm test` or CI. `typecheck` and
-`build` provide compilation checks.
+`test:capabilities`, `test:contracts`, `test:embedding`, and `eval` are LIVE,
+opt-in commands that call the real proxy and are never run by `npm test` or CI.
+`typecheck` and `build` provide compilation checks.
 
 > **Local `serve` DB hygiene.** `npm run serve` with the DEFAULT
 > `CHECKPOINT_DB_PATH` writes `./data/checkpoints.sqlite` INSIDE the repo. It is
@@ -107,6 +108,7 @@ src/
     tool-runtime.ts    # Phase 6 (6d) bounded tool-execution timeout: withToolTimeout/invokeToolWithTimeout + ToolTimeoutError
     agent.ts           # Phase 6 (6c) tool-loop agent via createReactAgent + weddingTools + Aria persona (createWeddingAgent/runWeddingAgent)
     contracts.ts       # Phase 6 (6d) pure tool-call + structured-output contract matrix rendering/classification
+    embedding-compat.ts# Phase 7 (7d) pure embedding/dimension compatibility: classifier + predicate + console/markdown renderers
   run-chain.ts         # CLI entrypoint for Phase 1
   run-memory.ts        # CLI entrypoint for Phase 2
   cli.ts               # Phase 3 streaming terminal REPL and conversation controls
@@ -114,6 +116,7 @@ src/
   test-connection.ts   # LIVE smoke test (routed through createChatModel)
   probe-capabilities.ts# LIVE, opt-in capability probe -> docs/capabilities/<date>.md
   probe-contracts.ts   # Phase 6 (6d) LIVE, opt-in tool-call + structured-output contract probe -> docs/contracts/<date>.md
+  probe-embedding.ts   # Phase 7 (7d) LIVE, opt-in embedding alias + vector dimension compatibility probe -> docs/embeddings/<date>.md
   run-eval.ts          # LIVE, opt-in eval runner -> docs/eval/<date>.md
 evals/
   dataset.jsonl        # versioned wedding-planning eval prompts + deterministic expectations
@@ -121,10 +124,11 @@ evals/
 
 The offline Vitest suite lives under `test/` (outside `src/`, so it is never
 emitted to `dist/`). The pure modules above (`redaction.ts`, `capabilities.ts`,
-`eval.ts`, `repl.ts`, `schemas.ts`, `contracts.ts`, `tool-runtime.ts`) are
-I/O-free so the suite exercises them without a live call; the
-`probe-capabilities.ts`, `probe-contracts.ts`, and `run-eval.ts` scripts own the
-impure, live-only I/O and are never imported by tests.
+`eval.ts`, `repl.ts`, `schemas.ts`, `contracts.ts`, `tool-runtime.ts`,
+`embedding-compat.ts`) are I/O-free so the suite exercises them without a live
+call; the `probe-capabilities.ts`, `probe-contracts.ts`, `probe-embedding.ts`,
+and `run-eval.ts` scripts own the impure, live-only I/O and are never imported by
+tests.
 
 ### Structured domain data and safe tools (Phase 6) notes
 

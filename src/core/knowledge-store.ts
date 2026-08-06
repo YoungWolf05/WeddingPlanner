@@ -58,9 +58,14 @@ type Db = BetterSqlite3Database;
 // exactly like the checkpoint DB. The parent directory is created on first use.
 export const DEFAULT_KNOWLEDGE_DB_PATH = "./data/knowledge.sqlite";
 
-// Default embedding dimension. 768 matches the verified gemini-embedding-001
-// alias (docs/capabilities/2026-07-28.md). Configurable so 7d can do
-// compatibility checks; the value is recorded in the DB (see knowledge_meta).
+// Default embedding dimension when NOTHING else specifies one. 768 matches the
+// verified gemini-embedding-001 alias (docs/capabilities/2026-07-28.md). This is
+// the LAST-RESORT fallback: createKnowledgeStore now defaults its dimension from
+// config.embedDim (the 7d single source of truth, itself defaulting to 768), so
+// the store dimension, the compatibility expectation, and the live probe all
+// read ONE value. This constant MUST stay in lockstep with config.DEFAULT_EMBED_DIM
+// (asserted by an offline test). The effective value is recorded in the DB (see
+// knowledge_meta) and 7d verifies the embedding alias produces it.
 export const DEFAULT_EMBEDDING_DIM = 768;
 
 // The fixed-dimension vector table (sqlite-vec `vec0`). Its shadow tables are
@@ -356,8 +361,10 @@ export interface KnowledgeStore {
 }
 
 // Options for createKnowledgeStore. `dbPath` is injectable for tests (temp
-// paths), mirroring createCheckpointer(dbPath?). `embeddingDim` overrides the
-// default 768 (must match the DB's recorded dimension on reopen).
+// paths), mirroring createCheckpointer(dbPath?). `embeddingDim` OVERRIDES the
+// default; when omitted the store defaults to config.embedDim (the 7d single
+// source of truth, itself defaulting to DEFAULT_EMBEDDING_DIM / 768). Whatever
+// dimension is chosen must match the DB's recorded dimension on reopen.
 export interface KnowledgeStoreOptions {
   dbPath?: string;
   embeddingDim?: number;
@@ -503,7 +510,13 @@ function ensureVectorSchema(db: Db, requestedDim: number): number {
 export function createKnowledgeStore(
   options: KnowledgeStoreOptions = {}
 ): KnowledgeStore {
-  const requestedDim = options.embeddingDim ?? DEFAULT_EMBEDDING_DIM;
+  // Resolve the requested dimension from (in precedence order): an explicit
+  // per-store override, then config.embedDim (the 7d single source of truth,
+  // which itself defaults to 768). config.embedDim is always a positive integer,
+  // so the DEFAULT_EMBEDDING_DIM fallback is belt-and-suspenders for a future
+  // caller that passes an explicit undefined config.
+  const requestedDim =
+    options.embeddingDim ?? config.embedDim ?? DEFAULT_EMBEDDING_DIM;
   if (!Number.isInteger(requestedDim) || requestedDim <= 0) {
     throw new Error(
       `Invalid embedding dimension ${String(requestedDim)}: must be a positive integer.`
