@@ -234,7 +234,7 @@ import { config } from "../config"; // wrong — will fail at runtime
 
 ## Roadmap and phase governance
 
-[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 6 — Structured Domain Data and Safe Tools** is complete (all four Phase 6 exit criteria met with recorded evidence; increments 6a–6d delivered, reviewed, and covered by the offline suite). No phase is currently active. **Phase 7 — Knowledge Ingestion and Retrieval** is the next proposed phase and is NOT active until the user approves its activation.
+[`docs/roadmap.md`](docs/roadmap.md) is the phase/status source of truth. **Phase 6 — Structured Domain Data and Safe Tools** is complete (all four Phase 6 exit criteria met with recorded evidence; increments 6a–6d delivered, reviewed, and covered by the offline suite). **Phase 7 — Knowledge Ingestion and Retrieval** is now ACTIVE (user-approved) with increment plan 7a–7e; no Phase 7 exit criteria are met yet. **Phase 8 — Grounded Answers and Trusted Citations** is the next proposed phase and is NOT active until the user approves its activation.
 
 Do not activate or complete a phase without user approval. A completion status requires the approved exit criteria and recorded verification evidence; intent or partial implementation is insufficient.
 

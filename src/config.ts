@@ -27,6 +27,16 @@ export const config = {
   // relative to the process working directory). The parent directory is created
   // on first use. This db file is gitignored and must never be committed.
   checkpointDbPath: process.env.CHECKPOINT_DB_PATH?.trim() || undefined,
+  // Phase 7 (7a): filesystem path to the durable, app-owned KNOWLEDGE-BASE
+  // SQLite database (documents/chunks + the sqlite-vec vector table). This is a
+  // SEPARATE file and a SEPARATE better-sqlite3 connection from the conversation
+  // checkpoint DB above — the two never share a handle. Like CHECKPOINT_DB_PATH
+  // it is LOCAL persistence, NOT a provider setting, so it is deliberately NOT
+  // under the LITELLM_* namespace. Optional; when unset, the knowledge store
+  // falls back to its documented default (./data/knowledge.sqlite, relative to
+  // the process working directory). The parent directory is created on first
+  // use. This db file is gitignored (data/) and must never be committed.
+  knowledgeDbPath: process.env.KNOWLEDGE_DB_PATH?.trim() || undefined,
   // Phase 5 (5c): TCP port for the authenticated HTTP service (npm run serve).
   // Optional; defaults to 3000. Parsed lazily by the entrypoint so importing
   // config never fails on a bad port during offline tests.

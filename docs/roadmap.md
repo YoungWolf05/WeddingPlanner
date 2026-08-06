@@ -6,10 +6,10 @@
 | --- | --- |
 | Last reviewed | 2026-08-05 |
 | Current completed milestone | **Phase 6 — Structured Domain Data and Safe Tools** |
-| Active phase | **None** |
-| Next proposed phase | **Phase 7 — Knowledge Ingestion and Retrieval** |
+| Active phase | **Phase 7 — Knowledge Ingestion and Retrieval** |
+| Next proposed phase | **Phase 8 — Grounded Answers and Trusted Citations** |
 
-Phase 6 is complete (all four exit criteria met with recorded evidence; increments 6a–6d delivered, reviewed, and covered by the offline suite). No phase is currently active. Phase 7 is the next proposed phase and is not active until the user approves its activation.
+Phase 6 is complete (all four exit criteria met with recorded evidence; increments 6a–6d delivered, reviewed, and covered by the offline suite) and remains the last completed milestone. Phase 7 is now active (user-approved) with the recorded increment plan (7a–7e) and approved design decisions; no Phase 7 exit criteria are met yet. Phase 8 — Grounded Answers and Trusted Citations is the next proposed phase and is not active until the user approves its activation.
 
 ## Status vocabulary
 
@@ -270,7 +270,7 @@ Phase 6 is delivered as ordered, independently verifiable sub-increments. One su
 
 ### Phase 7 — Knowledge Ingestion and Retrieval
 
-**Status:** Planned
+**Status:** Active
 
 **Goal:** Build a durable, testable retrieval foundation before generating citation-bearing answers.
 
@@ -291,7 +291,28 @@ Phase 6 is delivered as ordered, independently verifiable sub-increments. One su
 
 **Implementation evidence and notes**
 
-- No ingestion pipeline, embedding integration, retriever, or persistent vector store currently exists.
+- Phase 7 is active (user-approved) with no exit criteria met yet. No ingestion pipeline, embedding integration, retriever, or persistent vector store exists yet; the increment plan below delivers them.
+
+**Approved design decisions (rationale for future readers)**
+
+- **Vector store:** the sqlite-vec extension on better-sqlite3 (consistent with the existing SQLite stack; single-file durability; transactions with metadata). pgvector remains deferred to Phase 10.
+- **Storage location:** a SEPARATE knowledge-base DB file via a new `KNOWLEDGE_DB_PATH` env var; the conversation checkpoints DB (`CHECKPOINT_DB_PATH`) is untouched. The app-owned knowledge schema evolves via the SAME versioned forward-only migration pattern established in Phase 5 (`src/core/migrations.ts` style).
+- **Embedding:** reuse `createEmbeddingsModel` (`src/core/embeddings.ts`); the Phase 7 embedding alias is `gemini-embedding-001` at 768 dimensions (embedding-readiness gate already MET, dated evidence [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md)), configured via `LITELLM_EMBED_MODEL`.
+- **Identity:** application-owned, content-hash-based stable document/chunk IDs (never model-generated); deterministic chunking (recursive splitter, fixed size + overlap) so chunk IDs are reproducible.
+- **Metadata:** trusted metadata (source URI, document ID, chunk index, content hash, timestamps, and an owner/authorization-ready field) to support later authorization and trusted citations without relying on model-generated identifiers.
+- **Testing:** consistent with the recorded cost-aware policy and the OFFLINE/CI-safe suite — offline deterministic tests use an INJECTED fake embedder (no network) to prove idempotency, update/delete, and ID stability; a LIVE, opt-in retrieval eval command produces dated evidence (`docs/retrieval/<date>.md`) for the retrieval-quality baseline and is NEVER part of `npm test`.
+- **Scope boundary:** Phase 7 is the retrieval foundation ONLY. No answer generation and no citations (those are Phase 8); no web UI (Phase 9).
+
+**Increment plan (7a–7e)**
+
+Phase 7 is delivered as ordered, independently verifiable sub-increments; each is delivered as implement → code-review → verify. One sub-increment is worked at a time.
+
+- **7a — Persistence & schema foundation.** App-owned knowledge-base SQLite store at `KNOWLEDGE_DB_PATH` with sqlite-vec wiring; documents + chunks tables; trusted metadata columns; content-hash stable ID scheme; versioned forward-only migrations (Phase-5 pattern). (Contributes to exit criterion 3.)
+- **7b — Idempotent ingestion.** Deterministic chunking + content-hash doc/chunk IDs + embedding integration (injectable embedder) + idempotent upsert. Targets exit criterion 1 (re-ingesting unchanged content produces no duplicate documents or chunks).
+- **7c — Update/delete semantics.** Deterministic index state, documented identity rules, no orphaned or duplicate chunks. Targets exit criterion 2 (and completes exit criterion 3 alongside 7a).
+- **7d — Embedding/dimension verification + compatibility checks.** Offline dimension-guard plus an opt-in live verification tied to the capabilities evidence. Targets exit criterion 4.
+- **7e — Retriever + retrieval-only eval.** Retriever plus a retrieval-only eval dataset & metrics (recall@k, MRR/nDCG) + approved baseline; includes authoring a small curated, benign, PII-free wedding-domain knowledge corpus under `knowledge/` as the ingestion input and basis for the retrieval-only eval set. Targets exit criterion 5.
+- **Exit criterion 3** (metadata supports later authorization and trusted citations without model-generated identifiers) is satisfied across 7a + 7c.
 
 ### Phase 8 — Grounded Answers and Trusted Citations
 
@@ -398,3 +419,4 @@ Add one concise row only after approval; do not use this table as a session log.
 | 2026-07-28 | Phase 6 | 6b Complete under active Phase 6; 6c becomes active | User-approved 6b delivery/review | Two SAFE, pure, deterministic, read-only tools in `src/core/tools.ts` with `tool()` wrappers + Zod input schemas — `days_until` (UTC calendar-day only, strict `YYYY-MM-DD` parsing, injectable `now`) and `split_budget` (default wedding split, custom percentages OR amounts, largest-remainder exact-sum rounding, reusing the 6a `validateBudgetAllocation`/`budgetPlanStrictSchema` over-allocation rule; under-allocation allowed); exported `weddingTools` registry for 6c; no agent/tool-loop or model construction (4b/4c guards intact); `src/core/schemas.ts` unmodified; 306 offline tests (`test/phase6-tools.test.ts`); `npm run typecheck` and `npm run build` pass; reviewed (Ready; Blocking finding B1 fixed and re-reviewed Ready, plus R1/R2/N2). Phase 6 remains Active (top-level exit criteria unticked; closeout is 6d) |
 | 2026-07-28 | Phase 6 | 6c Complete under active Phase 6; 6d becomes active | User-approved 6c delivery/review | Wedding-planning tool-loop agent in `src/core/agent.ts` (`createWeddingAgent`/`runWeddingAgent`, `DEFAULT_AGENT_MODEL=claude-sonnet-4-6`) wiring the 6b `weddingTools` into LangGraph's prebuilt `createReactAgent({ llm, tools, prompt })` with the Aria persona, building the model via `createChatModel` (4b guard) and honoring the opus temperature-omit rule via the shared `isTemperatureOmitModel` predicate; plain-chat graph (`chain.ts`) untouched, no HTTP/CLI wiring (deferred to 6d); headline exit-criterion "days until 2026-12-12 + split $30k budget" proven OFFLINE with a scripted tool-calling fake (`test/helpers/fake-model.ts`) + REAL react loop/`ToolNode`/tools (both tools called, budget sums EXACTLY to 30000), plus single/no/tool-error paths and the opus-temp decision (`test/phase6-agent.test.ts`, 11 tests); 317 offline tests; `npm run typecheck` and `npm run build` pass; 4b/4c guards pass; no repo db artifacts; reviewed (Ready; no blocking; one Recommended R1 + a nitpick addressed as doc-only comments). Known future-migration item: `createReactAgent` is symbol-level `@deprecated` in `langgraph` 1.4.7 — migrating to the `langchain` `createAgent` is a deliberate future decision (prebuilt import intentionally kept per the accepted no-meta-package decision). Phase 6 remains Active (top-level exit criteria unticked; closeout is 6d) |
 | 2026-08-05 | Phase 6 | Active → Complete (user-approved; criterion-3 interpretation endorsed); Phase 7 becomes next proposed | User-approved Phase 6 closeout | All four Phase 6 exit criteria ticked above; 6a–6d Complete (6d bounded tool timeout `src/core/tool-runtime.ts`, refusal/malformed/provider handling in `src/core/structured.ts` incl. N1 empty-object hardening, only-permitted + tool-state/error agent message-contract tests, opt-in per-alias live contract probe `src/probe-contracts.ts` / `npm run test:contracts`); criterion 3 satisfied at the agent typed message-stream level (`tool_calls` / `ToolMessage` `status`) — the user-endorsed reading, with agent→SSE/CLI wiring deliberately deferred; criterion 4 evidence [`docs/contracts/2026-08-05.md`](contracts/2026-08-05.md) (opus + sonnet both `Supported`, opus with temperature omitted); 357 offline tests, `npm run typecheck` and `npm run build` pass; reviewed. No phase active; Phase 7 becomes the next proposed phase (not active until user-approved) |
+| 2026-08-05 | Phase 7 | Planned → Active (user-approved) | User-approved Phase 7 activation with approved design decisions and increment plan | No Phase 7 exit criteria met yet; increment plan 7a–7e and approved decisions (sqlite-vec on better-sqlite3; separate `KNOWLEDGE_DB_PATH` DB with Phase-5 versioned migrations; `gemini-embedding-001` @ 768 dims via `LITELLM_EMBED_MODEL`, gate met per [`docs/capabilities/2026-07-28.md`](capabilities/2026-07-28.md); app-owned content-hash IDs + deterministic chunking; trusted authorization/citation-ready metadata; offline fake-embedder tests + opt-in live retrieval eval) recorded above; Phase 8 becomes next proposed |
