@@ -25,6 +25,15 @@ data/
 *.sqlite-wal
 *.sqlite-shm
 
+# Phase 9 (9c) frontend (web/) is a SEPARATE npm project. Ignore its dependency
+# and build/cache artifacts only — NOT its source. web/dist is the scanned bundle
+# output; web/node_modules holds the frontend's own deps; web/.vite is Vite's
+# cache. The offline BACKEND build/test never touches web/.
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
+
 # OS
 .DS_Store
 Thumbs.db
