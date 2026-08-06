@@ -34,6 +34,17 @@ web/dist/
 web/.vite/
 web/*.tsbuildinfo
 
+# Phase 9 (9d) Playwright browser E2E (opt-in; SEPARATE from `npm test`). These
+# are generated run artifacts only — the specs/config/harness under web/e2e ARE
+# committed. The E2E harness's sqlite db lives under os.tmpdir() (OUTSIDE the
+# repo), so it needs no ignore entry; these cover Playwright's own outputs and
+# any stray local temp dir.
+web/playwright-report/
+web/test-results/
+web/blob-report/
+web/e2e/.tmp/
+web/playwright/.cache/
+
 # OS
 .DS_Store
 Thumbs.db

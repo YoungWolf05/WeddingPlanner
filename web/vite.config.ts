@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 
 // Phase 9 (9c) Vite config for the Wedding Planner browser SPA.
@@ -23,25 +23,38 @@ import react from "@vitejs/plugin-react";
 // is ever referenced here or anywhere in the frontend.
 const proxyTarget = process.env.WEB_PROXY_TARGET ?? "http://127.0.0.1:3000";
 
+// The proxy table is shared by BOTH `vite` (dev) and `vite preview`. `preview`
+// serves the PRODUCTION build (web/dist) — this is what Phase 9d Playwright E2E
+// drives, so the browser exercises the same zero-creds production bundle the 9c
+// guardrail scans. The proxy keeps the browser SAME-ORIGIN with the backend
+// (no CORS); for E2E, WEB_PROXY_TARGET points at the deterministic harness
+// backend (web/e2e/fixtures/test-server.ts) instead of a live `npm run serve`.
+const apiProxy: Record<string, ProxyOptions> = {
+  "/threads": {
+    target: proxyTarget,
+    changeOrigin: true,
+    // SSE must not be buffered; keep the upstream connection streaming.
+    configure: (proxy) => {
+      proxy.on("proxyRes", (proxyRes) => {
+        // Defensive: ensure no intermediate buffering hint survives.
+        delete proxyRes.headers["content-length"];
+      });
+    },
+  },
+  "/healthz": {
+    target: proxyTarget,
+    changeOrigin: true,
+  },
+};
+
 export default defineConfig({
   plugins: [react()],
   server: {
-    proxy: {
-      "/threads": {
-        target: proxyTarget,
-        changeOrigin: true,
-        // SSE must not be buffered; keep the upstream connection streaming.
-        configure: (proxy) => {
-          proxy.on("proxyRes", (proxyRes) => {
-            // Defensive: ensure no intermediate buffering hint survives.
-            delete proxyRes.headers["content-length"];
-          });
-        },
-      },
-      "/healthz": {
-        target: proxyTarget,
-        changeOrigin: true,
-      },
-    },
+    proxy: apiProxy,
+  },
+  // `vite preview` uses its OWN proxy config (it does NOT read `server.proxy`),
+  // so mirror the same table here for the E2E production-bundle run.
+  preview: {
+    proxy: apiProxy,
   },
 });
