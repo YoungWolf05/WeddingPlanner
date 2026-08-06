@@ -117,4 +117,13 @@ export const config = {
   serviceHeadersTimeoutMs: process.env.SERVICE_HEADERS_TIMEOUT_MS?.trim() || undefined,
   serviceRequestTimeoutMs: process.env.SERVICE_REQUEST_TIMEOUT_MS?.trim() || undefined,
   serviceSseIdleTimeoutMs: process.env.SERVICE_SSE_IDLE_TIMEOUT_MS?.trim() || undefined,
+  // Phase 9 (9b): OPT-IN grounded-answer mode for `npm run serve`. When set to a
+  // truthy value ("1"/"true"/"yes", case-insensitive) the HTTP chat endpoint runs
+  // the Phase 8 two-step RAG pipeline (grounded answers + trusted citations +
+  // evidenceStatus, emitting v2 citation/artifact SSE events) over the durable
+  // knowledge store (KNOWLEDGE_DB_PATH), instead of the plain-chat conversational
+  // graph. Default OFF preserves the existing plain-chat serve behavior. Kept RAW
+  // here and interpreted by the entrypoint (src/run-server.ts); the offline suite
+  // never reads this — it injects the answerTurn seam directly.
+  serviceGroundedRaw: process.env.SERVICE_GROUNDED?.trim() || undefined,
 };

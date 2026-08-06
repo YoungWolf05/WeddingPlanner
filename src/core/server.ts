@@ -3,10 +3,12 @@ import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import { createConversationalChain } from "./chain.js";
 import { sessionConfig } from "./memory.js";
 import { extractChunkText } from "./repl.js";
-import { redactError } from "./redaction.js";
+import { redactError, redactText } from "./redaction.js";
 import { SseWriter } from "./sse.js";
 import type { ThreadStore } from "./threads.js";
 import type { TokenAuthenticator } from "./auth.js";
+import type { AnswerTurn } from "./grounded-turn.js";
+import { TurnAbortedError } from "./grounded-turn.js";
 
 // Phase 5 (5c): the thin AUTHENTICATED HTTP service.
 //
@@ -122,6 +124,16 @@ export interface ServerDeps {
   // shared saver: () => createConversationalChain({ streaming: true }, saver).
   // Tests pass a factory returning a mocked-model graph.
   createChat: () => StreamingChat;
+  // Phase 9 (9b): OPTIONAL grounded-turn seam. When present, a chat turn runs the
+  // Phase 8 two-step RAG pipeline (grounded answer + TRUSTED citations +
+  // evidenceStatus) via this collaborator and drives the v2 SSE events
+  // (init -> token -> citation -> artifact -> done). When ABSENT, the chat turn
+  // uses the existing plain-chat `createChat` streaming path UNCHANGED (Phase 5
+  // behavior preserved). Production injects createAnswerTurn() over a live store +
+  // embedder + model; tests inject a scripted AnswerTurn (no network). The server
+  // ALWAYS passes the authenticated ownerId (never client-supplied) into it, so
+  // grounded retrieval + citations stay owner-scoped and authorization-consistent.
+  answerTurn?: AnswerTurn;
   // Optional structured logger for server-side diagnostics. Defaults to a
   // console.error sink. Whatever is passed, the server only ever hands it
   // ALREADY-REDACTED strings.
@@ -578,33 +590,51 @@ async function handleChat(
     // Emit the versioned init marker (also flushes SSE headers).
     sse.init(threadId);
 
-    // Arm the idle watchdog now — BEFORE awaiting the stream — so a stall during
-    // stream setup (no first token) is also bounded, not just gaps between tokens.
+    // Arm the idle watchdog now — BEFORE awaiting the work — so a stall during
+    // setup (no first token) is also bounded, not just gaps between tokens.
     armIdleTimer();
 
-    // Drive the graph with streamMode "messages" (same contract as the REPL),
-    // but translate chunks into the versioned SSE token events.
-    const graph = deps.createChat();
-    const stream = await graph.stream(
-      { messages: [new HumanMessage(message)] },
-      {
-        ...sessionConfig(threadId),
-        streamMode: "messages",
+    if (deps.answerTurn !== undefined) {
+      // GROUNDED PATH (9b). Run the Phase 8 two-step RAG pipeline for this turn
+      // and translate its result into v2 SSE events. The two-step RAG is NOT a
+      // token stream — the full answer + resolved/authorized citations are known
+      // only at completion — so we emit the answer as ONE token, then the batched
+      // citation event, then a structured artifact envelope, then done. The idle
+      // watchdog bounds a stalled RAG turn exactly as it bounds a stalled graph.
+      accumulated = await runGroundedTurn({
+        answerTurn: deps.answerTurn,
+        message,
+        ownerId,
         signal: controller.signal,
-      }
-    );
+        sse,
+        isTimedOut: () => timedOut,
+      });
+    } else {
+      // PLAIN-CHAT PATH (Phase 5, UNCHANGED). Drive the graph with streamMode
+      // "messages" (same contract as the REPL), translating chunks into token
+      // events and resetting the idle watchdog on each emitted token.
+      const graph = deps.createChat();
+      const stream = await graph.stream(
+        { messages: [new HumanMessage(message)] },
+        {
+          ...sessionConfig(threadId),
+          streamMode: "messages",
+          signal: controller.signal,
+        }
+      );
 
-    for await (const [chunk] of stream) {
-      const piece = extractChunkText(chunk.content);
-      // Once the idle watchdog has fired we stop processing chunks entirely: no
-      // token is written (SseWriter would no-op anyway) and, crucially, the timer
-      // is NOT re-armed. A graph that emits one more buffered chunk before it
-      // honors the abort therefore cannot produce a second idle-timeout.
-      if (piece.length > 0 && !timedOut) {
-        accumulated += piece;
-        sse.token(piece);
-        // Progress made: reset the idle watchdog.
-        armIdleTimer();
+      for await (const [chunk] of stream) {
+        const piece = extractChunkText(chunk.content);
+        // Once the idle watchdog has fired we stop processing chunks entirely: no
+        // token is written (SseWriter would no-op anyway) and, crucially, the timer
+        // is NOT re-armed. A graph that emits one more buffered chunk before it
+        // honors the abort therefore cannot produce a second idle-timeout.
+        if (piece.length > 0 && !timedOut) {
+          accumulated += piece;
+          sse.token(piece);
+          // Progress made: reset the idle watchdog.
+          armIdleTimer();
+        }
       }
     }
 
@@ -640,9 +670,10 @@ async function handleChat(
     // response is closed without a second frame.
     if (timedOut) {
       sse.end();
-    } else if (controller.signal.aborted) {
+    } else if (controller.signal.aborted || err instanceof TurnAbortedError) {
       // A client-initiated abort is NOT a server error: the socket is gone, so
-      // just stop.
+      // just stop. TurnAbortedError is the grounded seam's early-abort (the
+      // client disconnected before generation started) — same disposition.
       log("[server] chat turn aborted by client disconnect");
       sse.end();
     } else {
@@ -658,6 +689,89 @@ async function handleChat(
     req.removeListener("close", onClose);
     res.removeListener("close", onClose);
   }
+}
+
+// The structured-artifact `kind` the grounded path emits (9b). One stable
+// discriminator naming the envelope so the client (9c) picks a renderer. `data`
+// carries the REDACTED answer text + the app-authoritative evidenceStatus — a
+// JSON-safe, self-describing summary of the turn. See emitGroundedArtifact.
+export const GROUNDED_ANSWER_ARTIFACT_KIND = "grounded_answer";
+
+// Arguments for one grounded turn's SSE orchestration.
+interface RunGroundedTurnArgs {
+  answerTurn: AnswerTurn;
+  message: string;
+  ownerId: string;
+  signal: AbortSignal;
+  sse: SseWriter;
+  // Whether the idle watchdog has already fired (so we suppress emission).
+  isTimedOut: () => boolean;
+}
+
+// Run the Phase 8 RAG pipeline for one chat turn and emit the v2 SSE events for
+// a GROUNDED answer, returning the full answer text (for the terminal `done`).
+//
+// v2 EVENT SEQUENCE (grounded turn), within the init..done envelope armed by the
+// caller (handleChat emits `init` before calling this and `done` + `end` after):
+//   token(answer)                                  -> the full grounded answer
+//   citation(resolvedCitations, evidenceStatus)    -> TRUSTED, app-owned citations
+//   artifact({ kind: "grounded_answer", data })    -> a redacted structured envelope
+//
+// STREAMING CHOICE (documented). The two-step RAG is NON-streaming — the full
+// answer + the resolved/authorized citation set are known only at completion — so
+// the answer is emitted as ONE token (the contract allows token* then done). We do
+// NOT synthesize artificial chunking. A future increment could stream the
+// generation model directly; that is out of scope for 9b.
+//
+// TRUST + REDACTION. The citation event carries ONLY app-owned TrustedCitation
+// fields (ownerId dropped by toSseCitation); dropped/hallucinated markers never
+// reach the wire because answerQuestion resolves citations off the app-owned
+// markerMap (8b). The answer text is dynamic free-text, so it is REDACTED before
+// the token event AND before the artifact `data` (the caller-redacts contract for
+// token/artifact). An empty-evidence turn carries an empty citation list and an
+// "insufficient" evidenceStatus (no fabricated citation).
+//
+// CANCELLATION. The seam observes the AbortSignal (early-abort before generation
+// — see grounded-turn.ts). After it returns we re-check both the idle-watchdog
+// flag and the abort signal and SKIP emission when either fired, so nothing is
+// written for an abandoned turn (SseWriter also guards write-after-close).
+async function runGroundedTurn(args: RunGroundedTurnArgs): Promise<string> {
+  const { answerTurn, message, ownerId, signal, sse, isTimedOut } = args;
+
+  const result = await answerTurn({ query: message, ownerId, signal });
+
+  // If the turn was torn down while generation ran (idle watchdog fired, or the
+  // client disconnected), do not emit — the stream is being closed by the
+  // watchdog/abort path. Return the (redacted) text so the caller's completion
+  // logic stays consistent; the guards below prevent any wire write anyway.
+  const answerText = redactText(result.answer.answer);
+  if (isTimedOut() || signal.aborted) {
+    return answerText;
+  }
+
+  // Emit the full grounded answer as one token (see STREAMING CHOICE).
+  if (answerText.length > 0) {
+    sse.token(answerText);
+  }
+
+  // Emit the TRUSTED citations (app-owned fields only) + the app-authoritative
+  // evidenceStatus. Non-terminal. For an "insufficient" turn resolvedCitations is
+  // empty (rag.ts keeps them consistent) — the client renders the insufficient
+  // state with no citations.
+  sse.citations(result.resolvedCitations, result.evidenceStatus);
+
+  // Emit a structured artifact envelope summarizing the grounded answer. `data`
+  // is JSON-safe and REDACTED (answer text scrubbed; evidenceStatus is a fixed
+  // enum). See GROUNDED_ANSWER_ARTIFACT_KIND.
+  sse.artifact({
+    kind: GROUNDED_ANSWER_ARTIFACT_KIND,
+    data: {
+      answer: answerText,
+      evidenceStatus: result.evidenceStatus,
+    },
+  });
+
+  return answerText;
 }
 
 // Validate the chat body's `message`. Returns the trimmed message, or null when

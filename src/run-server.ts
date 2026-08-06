@@ -3,8 +3,19 @@ import { getSqliteSaver } from "./core/memory.js";
 import { createThreadStore } from "./core/threads.js";
 import { createTokenAuthenticator, parseAuthTokens } from "./core/auth.js";
 import { createServer, DEFAULT_TIMEOUTS, parseTimeoutMs, type StreamingChat } from "./core/server.js";
+import { createKnowledgeStore } from "./core/knowledge-store.js";
+import { createQueryEmbedder } from "./core/retriever.js";
+import { createAnswerTurn, type AnswerTurn } from "./core/grounded-turn.js";
 import { config } from "./config.js";
 import { redactError } from "./core/redaction.js";
+
+// Interpret the OPT-IN SERVICE_GROUNDED flag (see config.serviceGroundedRaw).
+// Truthy = "1"/"true"/"yes" (case-insensitive); anything else (including unset)
+// is OFF, preserving the existing plain-chat serve behavior.
+function isGroundedEnabled(raw: string | undefined): boolean {
+  if (!raw) return false;
+  return ["1", "true", "yes"].includes(raw.toLowerCase());
+}
 
 // Phase 5 (5c): LIVE entrypoint for the authenticated HTTP service.
 //
@@ -73,6 +84,21 @@ function main(): void {
     ),
   };
 
+  // Phase 9 (9b): OPT-IN grounded-answer mode. When SERVICE_GROUNDED is truthy,
+  // build the grounded-turn seam over the durable knowledge store + the real
+  // query embedder (routed through the single embeddings factory) + the default
+  // generation model. answerTurn drives the v2 citation/artifact SSE events; when
+  // OFF (default) the chat endpoint keeps the plain-chat streaming path. The
+  // knowledge store opens a durable file handle here in the LIVE entrypoint (never
+  // imported by the offline suite), so this side effect stays out of `npm test`.
+  const grounded = isGroundedEnabled(config.serviceGroundedRaw);
+  let answerTurn: AnswerTurn | undefined;
+  if (grounded) {
+    const knowledgeStore = createKnowledgeStore();
+    const queryEmbedder = createQueryEmbedder();
+    answerTurn = createAnswerTurn({ store: knowledgeStore, queryEmbedder });
+  }
+
   const server = createServer({
     store,
     auth,
@@ -80,6 +106,7 @@ function main(): void {
       // For 5c the graph is constructed with streaming: true so streamMode
       // "messages" yields incremental token chunks.
       createConversationalChain({ streaming: true }, saver) as StreamingChat,
+    ...(answerTurn !== undefined ? { answerTurn } : {}),
     timeouts,
   });
 
@@ -91,7 +118,8 @@ function main(): void {
       address && typeof address === "object" ? address.port : port;
     console.error(
       `[server] Wedding Planner HTTP service listening on http://${host}:${boundPort} ` +
-        `(${auth.size} auth token(s) configured)`
+        `(${auth.size} auth token(s) configured; ` +
+        `chat mode: ${grounded ? "grounded (RAG + citations)" : "plain-chat"})`
     );
   });
 
