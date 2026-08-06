@@ -1,4 +1,5 @@
 import { redactError, redactText } from "./redaction.js";
+import { config } from "../config.js";
 import { createEmbeddingsModel, type EmbeddingsOptions } from "./embeddings.js";
 import { chunkText, type ChunkingOptions } from "./chunking.js";
 import {
@@ -433,11 +434,23 @@ export function deleteSource(
  * `src/core/embeddings.ts`) — it constructs no client itself, honoring the
  * single-factory rule. OFFLINE tests never call this; they inject a fake
  * embedder directly.
+ *
+ * DIMENSION IS REQUESTED EXPLICITLY HERE. Ingested vectors MUST match the
+ * knowledge store's FIXED dimension (`store.embeddingDim`, sourced from
+ * `config.embedDim`), so this adapter passes `dimensions: config.embedDim` to the
+ * factory (a Matryoshka-truncation request — e.g. 768 via gemini-embedding-001).
+ * The factory no longer defaults `dimensions` (see the WIRE CONTRACT in
+ * embeddings.ts); making the request EXPLICIT at this store-writing call site is
+ * what keeps live ingestion producing store-compatible vectors. A caller may
+ * still override `options.dimensions` (it wins over the default below).
  */
 export function createDocumentEmbedder(
   options: EmbeddingsOptions = {}
 ): DocumentEmbedder {
-  const model = createEmbeddingsModel(options);
+  const model = createEmbeddingsModel({
+    dimensions: config.embedDim,
+    ...options,
+  });
   return {
     async embedDocuments(texts: string[]): Promise<number[][]> {
       try {

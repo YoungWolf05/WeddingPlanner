@@ -1,0 +1,15 @@
+{"id": "budget-split", "query": "How should I split my wedding budget across categories?", "relevantSourceUris": ["knowledge/corpus/budget-basics.md"]}
+{"id": "budget-contingency", "query": "How much should I set aside as a contingency buffer for wedding costs?", "relevantSourceUris": ["knowledge/corpus/budget-basics.md"]}
+{"id": "budget-save", "query": "What are the best ways to save money on a wedding without making it feel cheap?", "relevantSourceUris": ["knowledge/corpus/budget-saving-tips.md"]}
+{"id": "budget-guest-count-cost", "query": "Does cutting the guest list actually lower the cost of the wedding?", "relevantSourceUris": ["knowledge/corpus/budget-saving-tips.md", "knowledge/corpus/guest-list-and-rsvps.md"]}
+{"id": "timeline-12mo", "query": "Give me a twelve month wedding planning checklist of what to do and when", "relevantSourceUris": ["knowledge/corpus/timeline-12-month.md"]}
+{"id": "timeline-dayof", "query": "How do I build a minute by minute schedule for the wedding day itself?", "relevantSourceUris": ["knowledge/corpus/day-of-timeline.md"]}
+{"id": "venue-capacity", "query": "What should I check when choosing a wedding venue and comparing what is included?", "relevantSourceUris": ["knowledge/corpus/venue-selection.md"]}
+{"id": "theme-palette", "query": "How do I choose a color palette and decor style that matches my venue?", "relevantSourceUris": ["knowledge/corpus/theme-and-decor.md"]}
+{"id": "guest-rsvp-timing", "query": "When should I send save the dates and invitations and set the RSVP deadline?", "relevantSourceUris": ["knowledge/corpus/guest-list-and-rsvps.md"]}
+{"id": "seating-accessible", "query": "How do I plan seating and make the reception accessible for guests with mobility needs?", "relevantSourceUris": ["knowledge/corpus/seating-and-accessibility.md"]}
+{"id": "ceremony-customs", "query": "What cultural ceremony traditions like handfasting or a tea ceremony can we include?", "relevantSourceUris": ["knowledge/corpus/ceremony-traditions.md"]}
+{"id": "vendor-booking-order", "query": "In what order should I book wedding vendors and what should I check before signing?", "relevantSourceUris": ["knowledge/corpus/vendor-selection.md"]}
+{"id": "catering-style", "query": "Should I do a plated dinner or a buffet and what about dietary needs and the bar?", "relevantSourceUris": ["knowledge/corpus/catering-and-menu.md"]}
+{"id": "photo-coverage", "query": "What should I ask a wedding photographer about coverage, deliverables, and rights?", "relevantSourceUris": ["knowledge/corpus/photography-and-video.md"]}
+{"id": "dietary-cross", "query": "How do I collect and handle guest dietary restrictions and allergies for the meal?", "relevantSourceUris": ["knowledge/corpus/catering-and-menu.md", "knowledge/corpus/seating-and-accessibility.md"]}

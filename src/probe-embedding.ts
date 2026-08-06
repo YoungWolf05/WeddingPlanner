@@ -113,6 +113,14 @@ async function main(): Promise<void> {
   } else {
     process.stderr.write(`  probing embedding alias ${alias} ...\n`);
     try {
+      // Deliberately OMIT `dimensions` so the factory sends no dimension request
+      // and the alias returns its NATIVE dimension (see the WIRE CONTRACT in
+      // src/core/embeddings.ts). This is what makes the check below meaningful:
+      // classifyEmbeddingCompatibility compares the OBSERVED NATIVE dimension
+      // against the expected config.embedDim, so a truly wrong-dimension alias is
+      // detected as DimensionMismatch. If we passed dimensions:expectedDim the
+      // check would be tautological (it would only confirm the proxy honored the
+      // request, not that the alias natively matches the store).
       const embeddings = createEmbeddingsModel({ model: alias });
       // A benign, PII-free wedding-domain probe sentence.
       const vector = await withTimeout(PROBE_TIMEOUT_MS, async () =>

@@ -36,6 +36,7 @@ npm run test:capabilities        # probe the chat/embedding capability matrix ->
 npm run test:contracts           # Phase 6 (6d) probe per-alias tool-call + structured-output contract -> docs/contracts/<date>.md
 npm run test:embedding           # Phase 7 (7d) verify the embedding alias + vector dimension through the proxy -> docs/embeddings/<date>.md
 npm run eval                     # run the wedding-planning eval dataset -> docs/eval/<date>.md
+npm run eval:retrieval           # Phase 7 (7e) ingest the curated knowledge/ corpus + run the retrieval-only eval (recall@k/precision@k/MRR/nDCG@k) vs the PROPOSED baseline -> docs/retrieval/<date>.md
 npm run serve                    # LIVE local durable conversation service (Phase 5); binds SERVICE_PORT on 127.0.0.1
 ```
 
@@ -49,9 +50,13 @@ entrypoint is never imported by the suite.
 
 `npm test` is fully OFFLINE and CI-safe: the model boundary (`createChatModel`)
 is mocked per test, so no credentials or network are used. `test:connection`,
-`test:capabilities`, `test:contracts`, `test:embedding`, and `eval` are LIVE,
-opt-in commands that call the real proxy and are never run by `npm test` or CI.
-`typecheck` and `build` provide compilation checks.
+`test:capabilities`, `test:contracts`, `test:embedding`, `eval`, and
+`eval:retrieval` are LIVE, opt-in commands that call the real proxy and are never
+run by `npm test` or CI. `eval:retrieval` builds an EPHEMERAL knowledge store in
+a temp dir OUTSIDE the repo (never `./data`), ingests the curated `knowledge/`
+corpus, and runs the retrieval-only eval; it leaves no repo artifacts other than
+the dated `docs/retrieval/<date>.md` evidence. `typecheck` and `build` provide
+compilation checks.
 
 > **Local `serve` DB hygiene.** `npm run serve` with the DEFAULT
 > `CHECKPOINT_DB_PATH` writes `./data/checkpoints.sqlite` INSIDE the repo. It is
@@ -109,6 +114,15 @@ src/
     agent.ts           # Phase 6 (6c) tool-loop agent via createReactAgent + weddingTools + Aria persona (createWeddingAgent/runWeddingAgent)
     contracts.ts       # Phase 6 (6d) pure tool-call + structured-output contract matrix rendering/classification
     embedding-compat.ts# Phase 7 (7d) pure embedding/dimension compatibility: classifier + predicate + console/markdown renderers
+    knowledge-store.ts # Phase 7 (7a/7c) durable app-owned knowledge store (own better-sqlite3 + sqlite-vec file);
+                       #   source-addressed identity (computeDocumentId/computeChunkId), searchChunksByVector KNN
+    chunking.ts        # Phase 7 (7b) deterministic recursive character chunker (pure); chunkText()
+    ingestion.ts       # Phase 7 (7b/7c) idempotent source-addressed upsert/update/delete; DocumentEmbedder seam +
+                       #   createDocumentEmbedder() adapter over createEmbeddingsModel()
+    retriever.ts       # Phase 7 (7e) PURE retrieve() over injected QueryEmbedder + store; L2->similarity score,
+                       #   trusted-metadata resolution (exit criterion 3), optional ownerId filter; createQueryEmbedder() adapter
+    retrieval-eval.ts  # Phase 7 (7e) PURE retrieval-eval: dataset parser + recall@k/precision@k/MRR/nDCG@k +
+                       #   aggregator + evaluateBaseline (PROPOSED thresholds) + console/markdown renderers
   run-chain.ts         # CLI entrypoint for Phase 1
   run-memory.ts        # CLI entrypoint for Phase 2
   cli.ts               # Phase 3 streaming terminal REPL and conversation controls
@@ -118,17 +132,63 @@ src/
   probe-contracts.ts   # Phase 6 (6d) LIVE, opt-in tool-call + structured-output contract probe -> docs/contracts/<date>.md
   probe-embedding.ts   # Phase 7 (7d) LIVE, opt-in embedding alias + vector dimension compatibility probe -> docs/embeddings/<date>.md
   run-eval.ts          # LIVE, opt-in eval runner -> docs/eval/<date>.md
+  run-retrieval-eval.ts# Phase 7 (7e) LIVE, opt-in retrieval-eval runner (ephemeral temp store) -> docs/retrieval/<date>.md
 evals/
   dataset.jsonl        # versioned wedding-planning eval prompts + deterministic expectations
+  retrieval.jsonl      # Phase 7 (7e) versioned retrieval queries + relevantSourceUris into knowledge/corpus
+knowledge/
+  README.md            # Phase 7 (7e) corpus provenance/licensing; source_uri is the stable identity key
+  corpus/*.md          # Phase 7 (7e) curated, benign, PII-free wedding-domain corpus (ingestion + retrieval-eval input)
 ```
 
 The offline Vitest suite lives under `test/` (outside `src/`, so it is never
 emitted to `dist/`). The pure modules above (`redaction.ts`, `capabilities.ts`,
 `eval.ts`, `repl.ts`, `schemas.ts`, `contracts.ts`, `tool-runtime.ts`,
-`embedding-compat.ts`) are I/O-free so the suite exercises them without a live
-call; the `probe-capabilities.ts`, `probe-contracts.ts`, `probe-embedding.ts`,
-and `run-eval.ts` scripts own the impure, live-only I/O and are never imported by
-tests.
+`embedding-compat.ts`, `chunking.ts`, `retrieval-eval.ts`) are I/O-free so the
+suite exercises them without a live call; `retriever.ts` is pure logic over an
+INJECTED embedder + store (offline tests inject a deterministic fake embedder + a
+temp sqlite-vec store). The `probe-capabilities.ts`, `probe-contracts.ts`,
+`probe-embedding.ts`, `run-eval.ts`, and `run-retrieval-eval.ts` scripts own the
+impure, live-only I/O and are never imported by tests.
+
+### Retriever + retrieval-only eval (Phase 7 / 7e) notes
+
+- **Retriever seam + trusted metadata (exit criterion 3).** `retriever.ts`
+  exposes a narrow `QueryEmbedder { embedQuery }` seam (production adapter
+  `createQueryEmbedder()` over the single `createEmbeddingsModel` factory; offline
+  tests inject a deterministic fake) and `retrieve({ store, queryEmbedder, query,
+  k, ownerId? })`. It embeds the query, dimension-checks the query vector against
+  `store.embeddingDim` REUSING the 7d `isEmbeddingDimensionCompatible` predicate
+  (typed redacted `QueryEmbeddingDimensionError` on mismatch), calls
+  `store.searchChunksByVector`, and RESOLVES each hit to the TRUSTED, APP-OWNED
+  metadata pulled FROM THE STORE (chunkId, documentId, sourceUri, chunkIndex,
+  ownerId, contentHash, distance) — never from model text. This hit→app-owned
+  metadata resolution is the concrete demonstration of exit criterion 3. The
+  L2→similarity transform is `score = 1/(1+distance)` (order-preserving, in
+  (0,1], documented in-module). Edge cases: empty/whitespace query → typed
+  `EmptyQueryError` (no embed); `k<=0`/non-integer → `InvalidKError`; empty store
+  → `[]`; `k` > corpus → all. The optional `ownerId` filter is the authorization
+  seam: it over-fetches a widened candidate window then filters post-KNN (the
+  documented k-underfill caveat). No reranking/agentic retrieval (later phases).
+- **Retrieval-only eval (exit criterion 5).** `retrieval-eval.ts` is PURE:
+  a strict JSONL parser for `evals/retrieval.jsonl` (items reference relevance by
+  stable `source_uri` — see below), DOCUMENT-LEVEL `recall@k`/`precision@k`/`MRR`/
+  `nDCG@k`, an aggregator, `evaluateBaseline(aggregate, thresholds)`, and
+  console/markdown renderers. `PROPOSED_BASELINE_THRESHOLDS` are PROPOSED and
+  require USER APPROVAL at Phase 7 closeout — they are inputs, never hard-coded as
+  "met". The LIVE `run-retrieval-eval.ts` (`npm run eval:retrieval`) builds an
+  EPHEMERAL store in a temp dir OUTSIDE the repo, ingests `knowledge/corpus/*.md`
+  with the real `createDocumentEmbedder()`, runs each query through `retrieve()`
+  with the real `createQueryEmbedder()`, and writes dated evidence to
+  `docs/retrieval/<date>.md`. It is NEVER part of `npm test`/CI.
+- **Corpus + dataset stability.** The curated corpus lives under `knowledge/`
+  (`README.md` provenance: authored-for-this-repo, MIT, benign, PII-free).
+  A document's `source_uri` (its repo-relative path) IS its app-owned identity:
+  `document_id = sha256(normalizeSourceUri(source_uri))`. `evals/retrieval.jsonl`
+  references relevance by `source_uri`, so the dataset stays stable when chunking
+  is tuned (chunk ids depend on chunking; source URIs do not). Metrics operate on
+  document-level relevance (the ranked chunk list is reduced to distinct source
+  documents).
 
 ### Structured domain data and safe tools (Phase 6) notes
 
@@ -247,6 +307,7 @@ Do not activate or complete a phase without user approval. A completion status r
 - All application chat-model construction goes through `createChatModel()` in `src/core/model.ts` — do not instantiate `ChatOpenAI` elsewhere (including `src/test-connection.ts`, which was routed through the factory in 4b). Embeddings construction goes through `createEmbeddingsModel()` in `src/core/embeddings.ts` — do not instantiate `OpenAIEmbeddings` elsewhere. An offline guard test (`test/phase4-model-factory.test.ts`) enforces both single-factory rules.
 - System prompt / persona changes belong in `src/core/prompts.ts`.
 - Evaluation dataset changes belong in `evals/dataset.jsonl`; property scorers live in `src/core/eval.ts`. Keep prompts benign and PII-free; keep expectations property-based (checkable without an LLM judge).
+- Retrieval-eval dataset changes belong in `evals/retrieval.jsonl` (reference relevance by stable `source_uri`); metrics/parser/renderers live in `src/core/retrieval-eval.ts`. The curated corpus lives under `knowledge/corpus/*.md` with provenance in `knowledge/README.md` — keep it benign and PII-free (no real names/emails/phones/addresses/secrets). A file's `source_uri` IS its identity; do not rename a corpus file without updating any dataset references.
 - Any string that may reach a log, trace, console, or dated evidence file must pass through `src/core/redaction.ts` first (always-on secret/PII scrubbing).
 - Service ownership/security (Phase 5): `thread_id` is a server-issued UUID conversation key, NEVER identity or authorization. The `ownerId` for every store operation comes ONLY from the authenticated bearer token (`src/core/auth.ts`) — never from any client-supplied body/query/header/path field. Not-owned and not-found are indistinguishable (identical 404, no existence leak). All client-facing and logged errors are redacted.
 - TypeScript strict mode is on. Do not disable strict checks or add `any` casts.

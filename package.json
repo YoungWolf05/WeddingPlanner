@@ -9,6 +9,7 @@
     "test:contracts": "tsx src/probe-contracts.ts",
     "test:embedding": "tsx src/probe-embedding.ts",
     "eval": "tsx src/run-eval.ts",
+    "eval:retrieval": "tsx src/run-retrieval-eval.ts",
     "chain": "tsx src/run-chain.ts",
     "memory": "tsx src/run-memory.ts",
     "chat": "tsx src/cli.ts",
