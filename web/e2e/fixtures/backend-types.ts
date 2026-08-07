@@ -75,6 +75,11 @@ export interface Thread {
 }
 export interface ThreadStore {
   createThread(ownerId: string, opts?: { title?: string }): Thread;
+  // The server also touches a thread after each successful turn (list-recency
+  // bookkeeping). The harness WRAPS this to record the just-completed turn's
+  // messages per thread for history replay (the grounded path does not persist
+  // to the conversational checkpointer). Runtime shape mirrors the real store.
+  touchThread(ownerId: string, threadId: string): boolean;
 }
 
 // Mirror of the StreamingChat factory return the server's createChat expects.
@@ -88,6 +93,18 @@ export interface TokenAuthenticator {
   readonly size: number;
 }
 
+// Mirror of src/core/server.ts HistoryMessage (the /threads/:id/messages wire
+// shape): a text-first { role, text } record.
+export interface HistoryMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+// Mirror of src/core/server.ts HistoryReader — the conversation-history replay
+// seam. The harness injects a deterministic recorder (the grounded path does not
+// persist to the conversational checkpointer, so history is captured in-harness).
+export type HistoryReader = (threadId: string) => Promise<HistoryMessage[]>;
+
 // The narrow ServerDeps the harness constructs. `store`/`auth` are typed as the
 // concrete harness values; the model/grounded seams are the faked boundary.
 export interface ServerDeps {
@@ -95,6 +112,7 @@ export interface ServerDeps {
   auth: TokenAuthenticator;
   createChat: StreamingChatFactory;
   answerTurn?: AnswerTurn;
+  readHistory?: HistoryReader;
   log?: (line: string) => void;
 }
 

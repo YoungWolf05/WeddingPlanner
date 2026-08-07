@@ -2,7 +2,7 @@ import { createConversationalChain } from "./core/chain.js";
 import { getSqliteSaver } from "./core/memory.js";
 import { createThreadStore } from "./core/threads.js";
 import { createTokenAuthenticator, parseAuthTokens } from "./core/auth.js";
-import { createServer, DEFAULT_TIMEOUTS, parseTimeoutMs, type StreamingChat } from "./core/server.js";
+import { createHistoryReader, createServer, DEFAULT_TIMEOUTS, parseTimeoutMs, type StreamingChat } from "./core/server.js";
 import { createKnowledgeStore } from "./core/knowledge-store.js";
 import { createQueryEmbedder } from "./core/retriever.js";
 import { createAnswerTurn, type AnswerTurn } from "./core/grounded-turn.js";
@@ -106,6 +106,13 @@ function main(): void {
       // For 5c the graph is constructed with streaming: true so streamMode
       // "messages" yields incremental token chunks.
       createConversationalChain({ streaming: true }, saver) as StreamingChat,
+    // Conversation-history replay (GET /threads/:id/messages): read a thread's
+    // prior messages from the SHARED durable saver via the compiled graph's
+    // getState. This serves REAL history for the default plain-chat mode. NOTE:
+    // grounded turns (SERVICE_GROUNDED) run answerTurn and do NOT persist to this
+    // checkpointer, so the route replays [] for grounded threads — see
+    // createHistoryReader's documented caveat.
+    readHistory: createHistoryReader(saver),
     ...(answerTurn !== undefined ? { answerTurn } : {}),
     timeouts,
   });

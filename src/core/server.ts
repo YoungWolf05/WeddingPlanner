@@ -1,5 +1,6 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
+import type { BaseCheckpointSaver } from "@langchain/langgraph";
 import { createConversationalChain } from "./chain.js";
 import { sessionConfig } from "./memory.js";
 import { extractChunkText } from "./repl.js";
@@ -114,6 +115,116 @@ export interface StreamingChat {
   ): Promise<AsyncIterable<[BaseMessage, unknown]>>;
 }
 
+// The minimal, wire-safe shape of ONE prior message returned by the
+// conversation-history replay route (GET /threads/:id/messages). Deliberately
+// TEXT-FIRST: only a role + already-redacted plain text. Historical citations /
+// tool events / artifacts are DEFERRED (a documented follow-up); the client
+// re-renders these as completed assistant turns with no citations/tools.
+export interface HistoryMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+// The INJECTED conversation-history seam. Given a thread id, resolve its prior
+// messages from the durable checkpointer as HistoryMessage[] in chronological
+// order. Kept as a narrow function type (mirroring the createChat seam) so the
+// offline suite injects a deterministic fake and production wires the real
+// compiled-graph getState reader (createHistoryReader below). The server calls
+// this ONLY AFTER the ownership gate has passed, so an unauthorized caller never
+// reaches it.
+export type HistoryReader = (threadId: string) => Promise<HistoryMessage[]>;
+
+// The minimal getState surface the history reader needs from a compiled
+// conversational graph — just enough to read a thread's persisted MessagesAnnotation
+// state without depending on the full Pregel type. `values.messages` is a
+// BaseMessage[] when the thread has history; on a never-used thread `values` may
+// be an empty object (or `messages` undefined), which we map to an empty list.
+export interface HistoryStateReader {
+  getState(config: {
+    configurable: { thread_id: string };
+  }): Promise<{ values?: { messages?: BaseMessage[] } } | undefined>;
+}
+
+// Map ONE persisted BaseMessage to the wire shape, or null to SKIP it.
+//
+// ROLE derivation is by the message's canonical TYPE (getType()): "human" ->
+// "user", "ai" -> "assistant". Using getType() (not `instanceof`) is deliberate
+// and load-bearing: a streamed turn persists an AIMessageChunk, which is NOT an
+// `instanceof AIMessage`, but DOES report getType() === "ai" — so a role check by
+// class would silently DROP every streamed assistant reply. A "system" message
+// (the per-turn injected persona — see chain.ts) is SKIPPED (not user-visible,
+// re-injected every turn, never part of the replayed transcript); any other type
+// ("tool"/"function"/etc.) is also SKIPPED — this route is TEXT-FIRST. The text
+// is flattened from the possibly-array `content` via the shared extractChunkText
+// helper (never dumps raw objects) and then REDACTED (defense-in-depth: the
+// always-redact convention applies to anything leaving the server, even benign
+// corpus/answer text). A message whose flattened+redacted text is empty is
+// omitted so a content-free frame never appears in the transcript.
+//
+// REPLAY-FIDELITY CAVEAT. The mandatory redaction pass (redactText) both
+// COLLAPSES all whitespace runs to single spaces and LENGTH-CAPS each message
+// (DEFAULT_MAX_LENGTH = 500 chars, appending an ellipsis), so replayed history
+// text is flattened to a single line and very long answers are truncated — it
+// can look materially different from the original live-streamed turn (lists /
+// paragraphs collapsed; long answers cut off). This is a DELIBERATE consequence
+// of the always-redact convention, not a bug; richer / verbatim historical
+// replay is future work.
+function historyMessageFromBaseMessage(message: BaseMessage): HistoryMessage | null {
+  const type = message.getType();
+  let role: "user" | "assistant";
+  if (type === "human") {
+    role = "user";
+  } else if (type === "ai") {
+    role = "assistant";
+  } else {
+    // "system" (persona) + tool/function/other messages: not part of the
+    // text-first replayed transcript.
+    return null;
+  }
+  const text = redactText(extractChunkText(message.content));
+  if (text === "") return null;
+  return { role, text };
+}
+
+// Map a persisted MessagesAnnotation message list to the wire history shape,
+// preserving chronological order and dropping skipped/empty messages.
+export function mapMessagesToHistory(messages: BaseMessage[]): HistoryMessage[] {
+  const out: HistoryMessage[] = [];
+  for (const message of messages) {
+    const mapped = historyMessageFromBaseMessage(message);
+    if (mapped !== null) out.push(mapped);
+  }
+  return out;
+}
+
+// Production history-reader factory. Wires the seam to the SHARED durable saver
+// via a compiled conversational graph's getState over sessionConfig(threadId) —
+// the SAME checkpointer + thread keying the chat path writes through, so a
+// plain-chat thread's persisted [Human, AI, ...] messages are read back exactly
+// as stored. It maps the snapshot's MessagesAnnotation messages to the wire
+// shape (System/tool skipped, content flattened, text redacted).
+//
+// IMPORTANT COVERAGE CAVEAT (SERVICE_GROUNDED). This reader reflects ONLY what
+// the CONVERSATIONAL GRAPH persisted. The grounded chat path (handleChat's
+// answerTurn branch, enabled by SERVICE_GROUNDED) runs the Phase 8 RAG pipeline
+// (grounded-turn.ts) and does NOT write to this checkpointer at all — it never
+// drives the conversational graph. So for a grounded deployment this route
+// returns [] for grounded threads (they exist + are owned, just have no
+// conversational-graph history). The DEFAULT plain-chat serve (SERVICE_GROUNDED
+// unset) persists real history and is fully covered. Fixing grounded persistence
+// is out of scope; this is documented honestly rather than silently shipped.
+export function createHistoryReader(
+  saver: BaseCheckpointSaver
+): HistoryReader {
+  return async (threadId: string): Promise<HistoryMessage[]> => {
+    const graph = createConversationalChain({}, saver) as HistoryStateReader;
+    const snapshot = await graph.getState(sessionConfig(threadId));
+    const messages = snapshot?.values?.messages;
+    if (messages === undefined || messages.length === 0) return [];
+    return mapMessagesToHistory(messages);
+  };
+}
+
 // Injected collaborators. Keeping the graph behind a factory (not a singleton)
 // lets each chat turn get a fresh streaming graph bound to the SHARED saver, so
 // persistence works and cancellation is per-request.
@@ -134,6 +245,16 @@ export interface ServerDeps {
   // ALWAYS passes the authenticated ownerId (never client-supplied) into it, so
   // grounded retrieval + citations stay owner-scoped and authorization-consistent.
   answerTurn?: AnswerTurn;
+  // Conversation-history replay seam (GET /threads/:id/messages). Given a thread
+  // id, resolves its prior messages from the durable checkpointer. OPTIONAL so
+  // the surrounding routes/tests are unaffected when it is absent: when a request
+  // reaches the messages sub-route and this is undefined, the route responds 200
+  // { messages: [] } (a deployment that has not wired history simply replays an
+  // empty transcript — never an error). Production wires createHistoryReader over
+  // the shared saver; tests inject a deterministic fake. The server calls it ONLY
+  // AFTER the ownership gate has passed, so an unauthorized/not-owned caller never
+  // reaches it (asserted in the offline suite).
+  readHistory?: HistoryReader;
   // Optional structured logger for server-side diagnostics. Defaults to a
   // console.error sink. Whatever is passed, the server only ever hands it
   // ALREADY-REDACTED strings.
@@ -282,17 +403,21 @@ function writeJson(res: ServerResponse, result: JsonResult): void {
   res.end(payload);
 }
 
-// Route match for a thread path. Returns the thread id for /threads/:id and
-// /threads/:id/chat, plus whether it is the chat sub-route.
+// Route match for a thread path. `threadId` is the conversation key; `sub`
+// discriminates the recognized sub-routes:
+//   - null      -> /threads/:id           (item: GET/DELETE)
+//   - "chat"    -> /threads/:id/chat       (POST, SSE)
+//   - "messages"-> /threads/:id/messages   (GET, history replay)
 interface ThreadRoute {
   threadId: string;
-  isChat: boolean;
+  sub: "chat" | "messages" | null;
 }
 
-// Parse /threads, /threads/:id, /threads/:id/chat from a pathname. Returns:
+// Parse /threads, /threads/:id, /threads/:id/chat, /threads/:id/messages from a
+// pathname. Returns:
 //   - "collection" for exactly /threads,
-//   - a ThreadRoute for /threads/:id or /threads/:id/chat,
-//   - null if the path is not under /threads.
+//   - a ThreadRoute for /threads/:id, /threads/:id/chat, or /threads/:id/messages,
+//   - null if the path is not under /threads OR is a deeper/unknown sub-path.
 // The :id segment is URL-decoded and validated as non-empty. It is only ever a
 // conversation key scoped by the authenticated ownerId — never identity.
 function matchThreadRoute(
@@ -312,9 +437,10 @@ function matchThreadRoute(
     return null; // malformed percent-encoding
   }
   if (threadId === "") return null;
-  if (segments.length === 1) return { threadId, isChat: false };
-  if (segments.length === 2 && segments[1] === "chat") {
-    return { threadId, isChat: true };
+  if (segments.length === 1) return { threadId, sub: null };
+  if (segments.length === 2) {
+    if (segments[1] === "chat") return { threadId, sub: "chat" };
+    if (segments[1] === "messages") return { threadId, sub: "messages" };
   }
   return null; // deeper/unknown sub-paths
 }
@@ -389,12 +515,23 @@ async function route(
     return;
   }
 
-  if (threadRoute.isChat) {
+  if (threadRoute.sub === "chat") {
     if (method !== "POST") {
       writeJson(res, { status: 405, body: { error: "Method not allowed" } });
       return;
     }
     await handleChat(req, res, deps, ownerId, threadRoute.threadId, log);
+    return;
+  }
+
+  if (threadRoute.sub === "messages") {
+    // Read-only history replay. Mirror the chat sub-route's method guard: only
+    // GET is allowed (405 otherwise).
+    if (method !== "GET") {
+      writeJson(res, { status: 405, body: { error: "Method not allowed" } });
+      return;
+    }
+    await handleThreadMessages(res, deps, ownerId, threadRoute.threadId, log);
     return;
   }
 
@@ -477,6 +614,65 @@ async function handleThreadItem(
   }
 
   writeJson(res, { status: 405, body: { error: "Method not allowed" } });
+}
+
+// GET /threads/:id/messages — READ-ONLY conversation-history replay for an OWNED
+// thread. Returns the thread's prior messages (from the durable checkpointer) as
+// a minimal, wire-safe, TEXT-FIRST list in chronological order:
+//   200 { messages: [{ role, text }, ...] }
+//
+// SECURITY (identical to the rest of /threads*, NON-NEGOTIABLE):
+//   - The AUTHENTICATION GATE in route() already resolved ownerId from the bearer
+//     token (generic 401 on missing/unknown). ownerId comes ONLY from the token —
+//     never from path/query/body.
+//   - OWNERSHIP GATE FIRST: getThread(ownerId, threadId) enforces ownership. A
+//     not-owned OR nonexistent thread returns the SAME 404 as everywhere (no
+//     existence leak). History is read ONLY AFTER this gate passes, so the
+//     readHistory seam is never invoked for a thread the caller cannot access.
+//   - This route NEVER mutates state (no checkpoint write, no touch).
+//
+// EMPTY vs 404. An owned thread that has never been used (no persisted messages)
+// returns 200 { messages: [] } — it EXISTS and is OWNED, it just has no history
+// yet. Only a not-owned/nonexistent thread is a 404.
+//
+// GROUNDED CAVEAT. See createHistoryReader: a SERVICE_GROUNDED deployment's
+// grounded turns do NOT persist to the conversational checkpointer, so this route
+// returns [] for grounded threads. The default plain-chat serve has real history.
+//
+// FAILURE. A checkpointer read that throws becomes a REDACTED 500 (never leaks a
+// provider/DB error). When the readHistory seam is absent (unwired deployment) we
+// respond 200 { messages: [] } (an empty transcript, never an error).
+async function handleThreadMessages(
+  res: ServerResponse,
+  deps: ServerDeps,
+  ownerId: string,
+  threadId: string,
+  log: (line: string) => void
+): Promise<void> {
+  // OWNERSHIP GATE — before ANY history read. Not-owned/nonexistent => the SAME
+  // 404 as everywhere; the readHistory seam is NOT invoked in that case.
+  const thread = deps.store.getThread(ownerId, threadId);
+  if (thread === null) {
+    writeJson(res, NOT_FOUND);
+    return;
+  }
+
+  // Unwired history seam: replay an empty transcript rather than error.
+  if (deps.readHistory === undefined) {
+    writeJson(res, { status: 200, body: { messages: [] } });
+    return;
+  }
+
+  try {
+    const messages = await deps.readHistory(threadId);
+    writeJson(res, { status: 200, body: { messages } });
+  } catch (err) {
+    // A checkpointer read failure is a server-side fault; return a redacted 500
+    // and log a redacted line. No provider/DB internals reach the wire or logs.
+    const reason = redactError(err);
+    log(`[server] history read failed: ${reason}`);
+    writeJson(res, { status: 500, body: { error: "Internal error" } });
+  }
 }
 
 // Sentinel for an invalid title value (present but wrong type).

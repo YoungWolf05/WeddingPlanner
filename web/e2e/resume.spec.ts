@@ -1,18 +1,24 @@
 // Phase 9 (9d) E2E — THREAD RESUME (exit criterion 4: primary journeys / resume).
 //
-// DOCUMENTED BEHAVIOR (matches 9c). The backend does NOT yet expose full history
-// replay; per 9c, selecting a thread RE-FETCHES the thread's metadata (GET
-// /threads/:id — confirming ownership/existence) and RESETS the transcript. So
-// this spec asserts that documented behavior — the resumed thread is selectable,
-// becomes the active conversation, and the app is in a coherent state (a fresh,
-// empty transcript ready for a new turn) — NOT a false claim of replayed history.
+// CONVERSATION-HISTORY REPLAY (this increment). Selecting a thread now HYDRATES
+// its transcript from the backend history-replay route (GET /threads/:id/messages
+// — real auth + real ownership gate + real redaction) instead of resetting to an
+// empty transcript. So this spec asserts that switching AWAY from a thread and
+// then BACK to it shows that thread's real prior messages (the user's sent
+// message + the assistant reply), not a blank slate.
 //
-// LAZY-CREATE (BUG 1 fix). "+ New conversation" now prepares a UI DRAFT and the
-// server thread is created on the FIRST send (so its title is derived from that
-// message and PERSISTS — the backend only accepts a title at creation). While a
-// conversation is a draft it renders as an active thread-item with
-// data-thread-id="draft"; the REAL server id only exists after the first send.
-// So this spec reads each thread's real id AFTER its first message is sent.
+// DETERMINISTIC HISTORY SOURCE. The E2E harness runs the GROUNDED path
+// (answerTurn), which does NOT persist to the conversational checkpointer, so the
+// harness records each completed turn per-thread and serves it through the
+// injected readHistory seam (see fixtures/test-server.ts). The route, auth,
+// ownership gate, and wire shape exercised are the REAL production code.
+//
+// LAZY-CREATE (BUG 1 fix). "+ New conversation" prepares a UI DRAFT and the
+// server thread is created on the FIRST send (title derived from that message,
+// which PERSISTS). While a conversation is a draft it renders as an active
+// thread-item with data-thread-id="draft"; the REAL server id only exists after
+// the first send. So this spec reads each thread's real id AFTER its first
+// message is sent.
 
 import { expect, test } from "@playwright/test";
 import { TOKEN_USER } from "./fixtures/auth.js";
@@ -20,7 +26,7 @@ import { SUPPORTED_ANSWER } from "./fixtures/scripted.js";
 import { createThread, sendMessage, signInWith } from "./helpers.js";
 
 test.describe("thread resume", () => {
-  test("select a thread, send, create/switch to another, and back — resume re-fetches metadata + resets transcript", async ({
+  test("switching away from a thread and back replays its real history (user + assistant messages)", async ({
     page,
   }) => {
     await signInWith(page, TOKEN_USER);
@@ -67,25 +73,43 @@ test.describe("thread resume", () => {
       page.locator(`[data-testid="thread-item"][data-thread-id="${threadBId!}"]`)
     ).toHaveCount(1);
 
-    // Resume thread A by selecting it. It re-fetches (GET /threads/:id), RESETS
-    // the transcript (documented — no history replay), and becomes active.
+    // Resume thread A by selecting it. It re-fetches (GET /threads/:id) then
+    // HYDRATES the transcript from GET /threads/:id/messages, and becomes active.
     const threadA = page.locator(
       `[data-testid="thread-item"][data-thread-id="${threadAId!}"]`
     );
     await threadA.click();
     await expect(threadA).toHaveAttribute("aria-current", "true");
 
-    // DOCUMENTED resume behavior: the transcript is RESET (no full history replay
-    // is claimed) and the app is coherent — the composer is enabled, ready for a
-    // new turn. We assert the reset, NOT a false history replay.
-    await expect(page.getByTestId("message-user")).toHaveCount(0);
-    await expect(page.getByTestId("message-assistant")).toHaveCount(0);
-    await expect(page.getByTestId("composer-input")).toBeEnabled();
-
-    // A new turn on the resumed thread still works end-to-end.
-    await sendMessage(page, "another venue idea");
+    // HISTORY REPLAY: thread A's real prior messages appear — the user's first
+    // message AND the assistant reply — NOT a blank transcript. B's message must
+    // NOT appear on A.
+    await expect(
+      page.getByTestId("message-user").filter({ hasText: "recommend a venue" })
+    ).toBeVisible();
     await expect(
       page.getByTestId("message-assistant").filter({ hasText: SUPPORTED_ANSWER })
     ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-user")
+        .filter({ hasText: "another venue for the shortlist" })
+    ).toHaveCount(0);
+    // The replayed assistant turn is a COMPLETED turn (not streaming).
+    await expect(
+      page.locator('[data-testid="message-assistant"][data-status="done"]')
+    ).toHaveCount(1);
+    // Composer remains enabled — ready for a new turn on the resumed thread.
+    await expect(page.getByTestId("composer-input")).toBeEnabled();
+
+    // A new turn on the resumed thread still works end-to-end, appended AFTER the
+    // replayed history.
+    await sendMessage(page, "another venue idea");
+    await expect(
+      page.getByTestId("message-user").filter({ hasText: "another venue idea" })
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("message-assistant").filter({ hasText: SUPPORTED_ANSWER })
+    ).toHaveCount(2);
   });
 });

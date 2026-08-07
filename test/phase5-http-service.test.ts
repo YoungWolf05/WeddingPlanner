@@ -41,7 +41,10 @@ vi.mock("../src/core/model.js", async () => {
   };
 });
 
-const { createServer } = await import("../src/core/server.js");
+const { createServer, createHistoryReader, mapMessagesToHistory } = await import(
+  "../src/core/server.js"
+);
+const { AIMessage: AIMessageCtor } = await import("@langchain/core/messages");
 const { createConversationalChain } = await import("../src/core/chain.js");
 const { createCheckpointer, sessionConfig } = await import(
   "../src/core/memory.js"
@@ -775,5 +778,383 @@ describe("Phase 5 (5c) — cancellation & redaction", () => {
     expect(joinedLogs).not.toContain(config.apiKey);
     expect(joinedLogs).not.toContain(config.baseURL);
     expect(joinedLogs).not.toContain("planner@example.com");
+  });
+});
+
+// --- Conversation-history replay: GET /threads/:id/messages -----------------
+//
+// The history seam is INJECTED as a deterministic FAKE (no real graph/checkpointer
+// I/O) so these tests are fully offline. The store is the REAL temp-SQLite store,
+// so ownership is genuinely enforced. We assert:
+//   - happy path: owner + owned thread -> 200 { messages } in order, roles/text
+//     correct, and REDACTION applied to a secret-shaped message on the wire;
+//   - empty thread (owned, no history) -> 200 { messages: [] } (NOT 404);
+//   - auth: unauthenticated -> generic 401;
+//   - ownership: not-owned/nonexistent -> the SAME 404, and the history seam is
+//     NOT invoked (ownership gate runs first); ownerId from token only (spoofed
+//     body/query owner ignored);
+//   - method guard: non-GET -> 405;
+//   - routing: /messages does not collide with /:id or /:id/chat; deeper paths 404;
+//   - a checkpointer read that throws -> a REDACTED 500 (no leak).
+type HistoryMessage = import("../src/core/server.js").HistoryMessage;
+type ServerDeps = import("../src/core/server.js").ServerDeps;
+
+describe("Phase (history) — GET /threads/:id/messages", () => {
+  let tempDir: string;
+  let saver: SqliteSaver;
+  let server: Server;
+  let baseUrl: string;
+  let store: ThreadStore;
+  // Records the thread ids the injected history seam was asked for, so we can
+  // assert the ownership gate runs BEFORE any history read.
+  let historyCalls: string[];
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(tmpdir(), "wp-hist-"));
+    saver = makeSaver(path.join(tempDir, "checkpoints.sqlite"));
+    store = createThreadStore(saver);
+    historyCalls = [];
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    try {
+      saver.db.close();
+    } catch {
+      // already closed
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  function authHeaders(token: string): Record<string, string> {
+    return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  }
+
+  // Start a server with an injected history seam. The `history` map is keyed by
+  // thread id; a missing id yields []. `throwFor` forces the seam to throw for a
+  // given id (the checkpointer-read-failure path). Every lookup is recorded.
+  async function startServer(opts: {
+    history?: Record<string, HistoryMessage[]>;
+    throwFor?: string;
+    throwMessage?: string;
+    logs?: string[];
+  }): Promise<void> {
+    const auth = makeAuth();
+    const readHistory: NonNullable<ServerDeps["readHistory"]> = async (
+      threadId: string
+    ) => {
+      historyCalls.push(threadId);
+      if (opts.throwFor !== undefined && threadId === opts.throwFor) {
+        throw new Error(opts.throwMessage ?? "checkpointer read failed");
+      }
+      return opts.history?.[threadId] ?? [];
+    };
+    server = createServer({
+      store,
+      auth,
+      // The plain-chat graph must never run on this read-only route.
+      createChat: () => {
+        throw new Error("createChat must not run for the messages route");
+      },
+      readHistory,
+      log: opts.logs ? (line) => opts.logs!.push(line) : () => {},
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  }
+
+  it("happy path: owner + owned thread -> 200 { messages } in order, roles/text correct, redacted", async () => {
+    const t = store.createThread(USER_ALICE, { title: "with-history" });
+    // A user + assistant pair, plus an assistant message carrying a secret-shaped
+    // substring to prove redaction runs on the wire. The wire shape is produced
+    // by the SAME mapMessagesToHistory the production reader uses (System/tool
+    // skipped, content flattened, text REDACTED), so this asserts the real
+    // server-side redaction path — not a test-local scrub.
+    await startServer({
+      history: {
+        [t.id]: mapMessagesToHistory([
+          new HumanMessage("We have 120 guests."),
+          new AIMessageCtor("Great, here are venue ideas."),
+          new AIMessageCtor(`contact planner@example.com key=${config.apiKey}`),
+        ]),
+      },
+    });
+
+    const res = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await readJson(res);
+    const messages = body["messages"] as HistoryMessage[];
+    expect(messages.length).toBe(3);
+    // Order + roles + text preserved.
+    expect(messages[0]).toEqual({ role: "user", text: "We have 120 guests." });
+    expect(messages[1]).toEqual({
+      role: "assistant",
+      text: "Great, here are venue ideas.",
+    });
+    // Redaction applied on the wire: no secret/PII leaks; placeholders present.
+    const last = messages[2]!;
+    expect(last.role).toBe("assistant");
+    expect(last.text).not.toContain(config.apiKey);
+    expect(last.text).not.toContain("planner@example.com");
+    expect(last.text).toContain("[redacted-key]");
+    expect(last.text).toContain("[redacted-email]");
+  });
+
+  it("empty thread (owned, no history) -> 200 { messages: [] }, NOT 404", async () => {
+    const t = store.createThread(USER_ALICE, { title: "empty" });
+    await startServer({ history: {} });
+    const res = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(res.status).toBe(200);
+    expect(await readJson(res)).toEqual({ messages: [] });
+    // The seam WAS invoked for an owned thread.
+    expect(historyCalls).toEqual([t.id]);
+  });
+
+  it("unauthenticated -> generic 401 (seam NOT invoked)", async () => {
+    const t = store.createThread(USER_ALICE, { title: "x" });
+    await startServer({ history: { [t.id]: [{ role: "user", text: "hi" }] } });
+    const res = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      method: "GET",
+    });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Unauthorized" });
+    expect(historyCalls).toEqual([]);
+  });
+
+  it("not-owned/nonexistent -> identical 404, and the history seam is NOT invoked (ownership gate first)", async () => {
+    const t = store.createThread(USER_ALICE, { title: "alice-only" });
+    const randomId = "33333333-3333-4333-8333-333333333333";
+    await startServer({
+      history: { [t.id]: [{ role: "user", text: "secret history" }] },
+    });
+
+    // Bob on Alice's thread and on a random id: identical 404 status + body.
+    const bobOnAlice = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      headers: authHeaders(TOKEN_BOB),
+    });
+    const bobOnRandom = await fetch(`${baseUrl}/threads/${randomId}/messages`, {
+      headers: authHeaders(TOKEN_BOB),
+    });
+    expect(bobOnAlice.status).toBe(404);
+    expect(bobOnRandom.status).toBe(404);
+    expect(await bobOnAlice.json()).toEqual(await bobOnRandom.json());
+    // CRITICAL: the ownership gate ran first — the seam was never asked for
+    // either id (no history read for a thread the caller cannot access).
+    expect(historyCalls).toEqual([]);
+  });
+
+  it("ownerId from token only: a spoofed body/query/header owner is ignored", async () => {
+    const t = store.createThread(USER_ALICE, { title: "alice-only" });
+    await startServer({
+      history: { [t.id]: [{ role: "user", text: "history" }] },
+    });
+
+    // Bob tries to spoof Alice via query + headers. Still a 404 (Bob doesn't own
+    // it) and the seam is never invoked.
+    const spoofQuery = await fetch(
+      `${baseUrl}/threads/${t.id}/messages?ownerId=${USER_ALICE}&userId=${USER_ALICE}`,
+      {
+        headers: {
+          ...authHeaders(TOKEN_BOB),
+          "X-Owner-Id": USER_ALICE,
+          "X-User-Id": USER_ALICE,
+        },
+      }
+    );
+    expect(spoofQuery.status).toBe(404);
+    expect(historyCalls).toEqual([]);
+  });
+
+  it("method guard: non-GET on /messages -> 405", async () => {
+    const t = store.createThread(USER_ALICE, { title: "x" });
+    await startServer({ history: {} });
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      const res = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+        method,
+        headers: authHeaders(TOKEN_ALICE),
+        ...(method === "GET" ? {} : { body: JSON.stringify({}) }),
+      });
+      expect(res.status).toBe(405);
+    }
+    // A 405 short-circuits before any history read.
+    expect(historyCalls).toEqual([]);
+  });
+
+  it("routing: /messages does not collide with /:id or /:id/chat; deeper sub-paths -> 404", async () => {
+    const t = store.createThread(USER_ALICE, { title: "route" });
+    await startServer({
+      history: { [t.id]: [{ role: "user", text: "hi" }] },
+    });
+
+    // GET /:id still returns the thread record (NOT the messages list).
+    const item = await fetch(`${baseUrl}/threads/${t.id}`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(item.status).toBe(200);
+    expect((await readJson(item))["thread"]).toBeDefined();
+
+    // GET /:id/messages returns the messages list (NOT the thread record).
+    const msgs = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(msgs.status).toBe(200);
+    expect((await readJson(msgs))["messages"]).toEqual([
+      { role: "user", text: "hi" },
+    ]);
+
+    // A deeper/unknown sub-path is not a known route -> 404.
+    const deeper = await fetch(`${baseUrl}/threads/${t.id}/messages/extra`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(deeper.status).toBe(404);
+  });
+
+  it("checkpointer read throwing -> a REDACTED 500 (no secret/PII leak)", async () => {
+    const t = store.createThread(USER_ALICE, { title: "boom" });
+    const logs: string[] = [];
+    const leaky = `read boom apiKey=${config.apiKey} url=${config.baseURL} planner@example.com`;
+    await startServer({ throwFor: t.id, throwMessage: leaky, logs });
+
+    const res = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(res.status).toBe(500);
+    const body = await readJson(res);
+    // Generic error body — no provider/DB internals on the wire.
+    expect(body).toEqual({ error: "Internal error" });
+
+    // The log line is redacted (no secret/PII).
+    const joined = logs.join("\n");
+    expect(joined).toContain("history read failed");
+    expect(joined).not.toContain(config.apiKey);
+    expect(joined).not.toContain(config.baseURL);
+    expect(joined).not.toContain("planner@example.com");
+  });
+
+  it("no readHistory seam wired -> 200 { messages: [] } for an owned thread (never an error)", async () => {
+    const t = store.createThread(USER_ALICE, { title: "unwired" });
+    const auth = makeAuth();
+    server = createServer({
+      store,
+      auth,
+      createChat: () => {
+        throw new Error("createChat must not run for the messages route");
+      },
+      // readHistory intentionally omitted.
+      log: () => {},
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const res = await fetch(`${baseUrl}/threads/${t.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(res.status).toBe(200);
+    expect(await readJson(res)).toEqual({ messages: [] });
+  });
+});
+
+// --- End-to-end history via the REAL graph + saver + createHistoryReader -----
+//
+// Beyond the injected-fake seam tests above, this proves the PRODUCTION reader
+// (createHistoryReader over the shared saver) reads back messages that a REAL
+// chat turn (mocked model, real conversational graph + real SQLite checkpointer)
+// actually persisted — the exact plumbing `npm run serve` uses.
+describe("Phase (history) — createHistoryReader over the real graph/saver", () => {
+  let tempDir: string;
+  let saver: SqliteSaver;
+  let server: Server;
+  let baseUrl: string;
+
+  async function startServer(): Promise<void> {
+    const store = createThreadStore(saver);
+    const auth = makeAuth();
+    server = createServer({
+      store,
+      auth,
+      createChat: () => createConversationalChain({ streaming: true }, saver),
+      readHistory: createHistoryReader(saver),
+      log: () => {},
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  }
+
+  beforeEach(async () => {
+    resetRecordedCalls();
+    tempDir = await mkdtemp(path.join(tmpdir(), "wp-hist-real-"));
+    saver = makeSaver(path.join(tempDir, "checkpoints.sqlite"));
+  });
+
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    try {
+      saver.db.close();
+    } catch {
+      // already closed
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  function authHeaders(token: string): Record<string, string> {
+    return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  }
+
+  it("a completed chat turn is replayed as [user, assistant] via GET /messages", async () => {
+    await startServer();
+    const created = await fetch(`${baseUrl}/threads`, {
+      method: "POST",
+      headers: authHeaders(TOKEN_ALICE),
+      body: JSON.stringify({}),
+    });
+    const { thread } = await readJson(created);
+
+    // Run one chat turn (mocked model reply "hello there").
+    const chat = await fetch(`${baseUrl}/threads/${thread.id}/chat`, {
+      method: "POST",
+      headers: authHeaders(TOKEN_ALICE),
+      body: JSON.stringify({ message: "plan my wedding" }),
+    });
+    await chat.text(); // drain the SSE stream to completion
+
+    // Now replay history. The SystemMessage persona is SKIPPED; we see exactly
+    // the user message and the assistant reply, in order.
+    const res = await fetch(`${baseUrl}/threads/${thread.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(res.status).toBe(200);
+    const messages = (await readJson(res))["messages"] as HistoryMessage[];
+    expect(messages).toEqual([
+      { role: "user", text: "plan my wedding" },
+      { role: "assistant", text: "hello there" },
+    ]);
+  });
+
+  it("a brand-new owned thread with no turns replays as { messages: [] }", async () => {
+    await startServer();
+    const created = await fetch(`${baseUrl}/threads`, {
+      method: "POST",
+      headers: authHeaders(TOKEN_ALICE),
+      body: JSON.stringify({}),
+    });
+    const { thread } = await readJson(created);
+
+    const res = await fetch(`${baseUrl}/threads/${thread.id}/messages`, {
+      headers: authHeaders(TOKEN_ALICE),
+    });
+    expect(res.status).toBe(200);
+    expect(await readJson(res)).toEqual({ messages: [] });
   });
 });

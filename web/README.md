@@ -233,12 +233,20 @@ flags is what this verifies.
   cannot reach user1's thread (identical **404**, no existence leak, no data
   leak), driven with a direct authenticated `fetch` in the browser context using
   the **two-owner** auth map.
-- **`resume.spec.ts`** — *thread resume*: select a thread, send, switch to a new
-  one and back. The backend exposes **no full history replay**; per 9c, selecting
-  a thread **re-fetches its metadata** (`GET /threads/:id`) and **resets the
-  transcript**. The spec asserts that **documented** behavior (the thread is
-  selectable/active, the transcript is reset, a new turn works) — **not** a false
-  history replay.
+- **`resume.spec.ts`** — *thread resume with history replay*: select a thread,
+  send, switch to a new one and back. Selecting a thread **re-fetches its
+  metadata** (`GET /threads/:id`, the ownership gate) and then **HYDRATES the
+  transcript** from `GET /threads/:id/messages` — so returning to a thread shows
+  its **real prior messages** (the user's sent message + the assistant reply,
+  rendered as a completed turn), not a blank slate. **Text-first replay**: the
+  route/UI replay plain user + assistant text; historical citations/tool/artifacts
+  are deferred (never fabricated). Replayed message text is whitespace-collapsed
+  and length-capped by the server-side redaction pass, so resumed formatting can
+  differ from the live stream (a known limitation; rich/verbatim replay is future
+  work). The E2E's grounded harness does not persist to
+  the conversational checkpointer, so it records each turn per-thread and serves it
+  through the injected `readHistory` seam; the route/auth/ownership/redaction
+  exercised are the real production code.
 
 ### Notes
 

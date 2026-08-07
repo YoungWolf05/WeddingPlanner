@@ -4,6 +4,7 @@
 //   - POST   /threads            body { title? }        -> 201 { thread }
 //   - GET    /threads                                   -> 200 { threads }
 //   - GET    /threads/:id                               -> 200 { thread } | 404
+//   - GET    /threads/:id/messages                      -> 200 { messages } | 404
 //   - DELETE /threads/:id                               -> 204            | 404
 //   - POST   /threads/:id/chat   (SSE — see sseClient.ts, not here)
 //
@@ -159,6 +160,58 @@ export async function getThread(
     (parsed) => {
       const record = parsed as Record<string, unknown>;
       return asThread(record["thread"]);
+    }
+  );
+}
+
+// One prior conversation message from the history-replay route. Mirrors the
+// backend HistoryMessage wire shape (src/core/server.ts): a TEXT-FIRST record —
+// role + already-redacted plain text. Historical citations/tools/artifacts are
+// DEFERRED, so this carries neither.
+export interface HistoryMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+// Defensively validate ONE wire history entry: an object with a role of exactly
+// "user" | "assistant" and a string text. Anything else is malformed.
+function asHistoryMessage(value: unknown): HistoryMessage {
+  if (typeof value !== "object" || value === null) {
+    throw new ThreadApiError(0, "Malformed message in server response.");
+  }
+  const r = value as Record<string, unknown>;
+  const role = r["role"];
+  if (
+    (role !== "user" && role !== "assistant") ||
+    typeof r["text"] !== "string"
+  ) {
+    throw new ThreadApiError(0, "Malformed message in server response.");
+  }
+  return { role, text: r["text"] };
+}
+
+// GET /threads/:id/messages — replay an owned thread's prior messages
+// (chronological). 404 (not-owned/not-found) throws a ThreadApiError(404); the
+// wire shape is validated defensively (an array of { role, text }). Used on
+// resume/reconnect to HYDRATE the transcript. Read-only: it never mutates state.
+export async function getThreadMessages(
+  config: ThreadsApiConfig,
+  threadId: string
+): Promise<HistoryMessage[]> {
+  const { baseUrl = "", token } = config;
+  return requestJson(
+    `${baseUrl}/threads/${encodeURIComponent(threadId)}/messages`,
+    { method: "GET", headers: authHeaders(token) },
+    (parsed) => {
+      const record = parsed as Record<string, unknown>;
+      const messages = record["messages"];
+      if (!Array.isArray(messages)) {
+        throw new ThreadApiError(
+          0,
+          "Malformed message list in server response."
+        );
+      }
+      return messages.map(asHistoryMessage);
     }
   );
 }

@@ -32,8 +32,10 @@ import { deriveThreadTitle, UNTITLED_PLACEHOLDER } from "./lib/title.js";
 import {
   createThread,
   getThread,
+  getThreadMessages,
   listThreads,
   ThreadApiError,
+  type HistoryMessage,
   type Thread,
 } from "./lib/threadsApi.js";
 
@@ -51,6 +53,32 @@ let idCounter = 0;
 function nextId(prefix: string): string {
   idCounter += 1;
   return `${prefix}-${String(idCounter)}`;
+}
+
+// Map replayed server history (text-first { role, text }) into the transcript
+// VIEW MODEL. A "user" entry becomes a user ChatMessage; an "assistant" entry
+// becomes a COMPLETED assistant turn (status "done", text set) with NO
+// citations/tools/artifacts — historical rich replay is DEFERRED (backend is
+// text-first), so we never fabricate those. Ids reuse the monotonic nextId
+// pattern so keys stay unique. `sourceMessage` for a historical assistant turn
+// is best-effort: the preceding user message text (retry re-issues that message);
+// falls back to the assistant's own text if none precedes it.
+function historyToMessages(history: HistoryMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  let lastUserText = "";
+  for (const entry of history) {
+    if (entry.role === "user") {
+      lastUserText = entry.text;
+      out.push({ role: "user", id: nextId("user"), text: entry.text });
+    } else {
+      const turn = newAssistantTurn(
+        nextId("assistant"),
+        lastUserText !== "" ? lastUserText : entry.text
+      );
+      out.push({ ...turn, text: entry.text, status: "done" });
+    }
+  }
+  return out;
 }
 
 export function App(): React.ReactElement {
@@ -161,21 +189,38 @@ function Conversation(props: ConversationProps): React.ReactElement {
     setNotice(null);
   }, []);
 
-  // RESUME / RECONNECT: select a thread and re-fetch its state. (History
-  // rehydration is bounded by the backend contract; for 9c we re-fetch the
-  // thread record to confirm ownership/existence and reset the transcript. Full
-  // history replay is a backend affordance not yet exposed and is left to 9d /
-  // a later increment — documented in web/README.md.)
+  // RESUME / RECONNECT: select a thread, confirm ownership, and HYDRATE its prior
+  // messages from the backend history-replay route (GET /threads/:id/messages) so
+  // the transcript shows real history instead of a blank slate. We first
+  // getThread (the ownership/existence gate — a 404 there short-circuits before
+  // any history fetch), then getThreadMessages, mapping the text-first history
+  // into the view model (user entries -> user messages; assistant entries ->
+  // COMPLETED assistant turns; no fabricated citations/tools — those are
+  // deferred). On a history-fetch error we fall back to an empty transcript + a
+  // notice rather than crashing. Any in-flight stream is cancelled first.
   const handleSelect = useCallback(
     async (threadId: string): Promise<void> => {
       // Cancel any in-flight stream before switching context.
       controllerRef.current?.abort();
       try {
+        // Ownership/existence gate first (identical-404 on not-owned/not-found).
         const thread = await getThread({ baseUrl: BASE_URL, token }, threadId);
         setDraft(false); // selecting a real thread discards any pending draft.
         setCurrentThreadId(thread.id);
-        setMessages([]);
         setNotice(null);
+        // HYDRATE the transcript with the thread's real prior messages. A
+        // never-used thread returns [] (empty transcript). If the history fetch
+        // fails, keep the thread selected but show an empty transcript + notice.
+        try {
+          const history = await getThreadMessages(
+            { baseUrl: BASE_URL, token },
+            thread.id
+          );
+          setMessages(historyToMessages(history));
+        } catch (historyErr) {
+          setMessages([]);
+          handleApiError(historyErr, onSignOut, setNotice);
+        }
       } catch (err) {
         handleApiError(err, onSignOut, setNotice);
       }

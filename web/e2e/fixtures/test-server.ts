@@ -49,6 +49,8 @@ import type {
   BackendServerModule,
   BackendThreadsModule,
   GroundedAnswerResult,
+  HistoryMessage,
+  HistoryReader,
   HttpServerLike,
   SqliteSaverLike,
   ThreadStore,
@@ -153,6 +155,38 @@ function insufficientResult(): GroundedAnswerResult {
   };
 }
 
+// --- IN-HARNESS HISTORY RECORDER (for GET /threads/:id/messages replay) ------
+//
+// The grounded path (answerTurn) does NOT write to the conversational
+// checkpointer, so there is no real persisted history to read back. To exercise
+// the REAL history-replay ROUTE end-to-end (real auth + real ownership gate +
+// real 404/redaction), the harness records each completed turn's user+assistant
+// text per thread and serves it through the injected `readHistory` seam.
+//
+// CORRELATION. answerTurn receives (ownerId, query) but not the threadId; the
+// server calls `store.touchThread(ownerId, threadId)` immediately AFTER a
+// successful turn. E2E specs are SEQUENTIAL (one in-flight turn at a time), so we
+// stash the last (ownerId, query, answer) from answerTurn and pair it with the
+// next touchThread(ownerId, threadId) to append the turn to that thread's
+// transcript — a deterministic, offline reconstruction of replayable history.
+const historyByThread = new Map<string, HistoryMessage[]>();
+let pendingTurn: { ownerId: string; query: string; answer: string } | null =
+  null;
+
+function recordPendingTurn(ownerId: string, threadId: string): void {
+  if (pendingTurn === null || pendingTurn.ownerId !== ownerId) return;
+  const transcript = historyByThread.get(threadId) ?? [];
+  transcript.push({ role: "user", text: pendingTurn.query });
+  if (pendingTurn.answer !== "") {
+    transcript.push({ role: "assistant", text: pendingTurn.answer });
+  }
+  historyByThread.set(threadId, transcript);
+  pendingTurn = null;
+}
+
+const readHistory: HistoryReader = async (threadId: string) =>
+  historyByThread.get(threadId) ?? [];
+
 // The scripted grounded-turn seam. DETERMINISTIC + keyed off the message text:
 //   - contains "insufficient" -> the insufficient-evidence case
 //   - otherwise               -> a supported answer + one trusted citation
@@ -164,10 +198,12 @@ const scriptedAnswerTurn: AnswerTurn = async ({ query, ownerId, signal }) => {
     // Mirror the production seam's early-abort semantics on a pre-aborted turn.
     throw new groundedTurnMod.TurnAbortedError();
   }
-  if (query.toLowerCase().includes(INSUFFICIENT_TRIGGER)) {
-    return insufficientResult();
-  }
-  return supportedResult(ownerId);
+  const result = query.toLowerCase().includes(INSUFFICIENT_TRIGGER)
+    ? insufficientResult()
+    : supportedResult(ownerId);
+  // Stash this turn so the next touchThread pairs it to its thread (see above).
+  pendingTurn = { ownerId, query, answer: result.answer.answer };
+  return result;
 };
 
 // `createChat` must NEVER run on the grounded path. If it does, fail loudly so a
@@ -184,7 +220,23 @@ const tempDir = mkdtempSync(path.join(tmpdir(), "wp-e2e-"));
 const dbPath = path.join(tempDir, "checkpoints.sqlite");
 
 const saver: SqliteSaverLike = memoryMod.createCheckpointer(dbPath);
-const store: ThreadStore = threadsMod.createThreadStore(saver);
+const realStore: ThreadStore = threadsMod.createThreadStore(saver);
+
+// Wrap the real store so touchThread ALSO records the just-completed turn into
+// the in-harness history map (see recordPendingTurn). All other store methods
+// pass straight through to the REAL owner-scoped store (real ownership/404).
+const store: ThreadStore = new Proxy(realStore, {
+  get(target, prop, receiver) {
+    if (prop === "touchThread") {
+      return (ownerId: string, threadId: string): boolean => {
+        const result = target.touchThread(ownerId, threadId);
+        if (result) recordPendingTurn(ownerId, threadId);
+        return result;
+      };
+    }
+    return Reflect.get(target, prop, receiver) as unknown;
+  },
+});
 
 const auth: TokenAuthenticator = authMod.createTokenAuthenticator({
   [TOKEN_USER]: USER_ID,
@@ -196,6 +248,10 @@ const server: HttpServerLike = serverMod.createServer({
   auth,
   createChat: forbiddenCreateChat,
   answerTurn: scriptedAnswerTurn,
+  // Conversation-history replay (GET /threads/:id/messages) served from the
+  // in-harness recorder (the grounded path does not persist to the conversational
+  // checkpointer). The REAL route still enforces auth + the ownership gate.
+  readHistory,
   // Quiet, redacted-only logger (the server only ever hands it redacted strings).
   log: () => {},
 });
