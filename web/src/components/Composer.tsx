@@ -3,11 +3,17 @@
 // SEND posts the message to the chat SSE endpoint (App wires the stream). CANCEL
 // aborts the in-flight stream via App's AbortController. The input is disabled
 // while no thread is selected.
+//
+// BUG 1 (lazy-create): the FIRST send in a new conversation lazily creates the
+// server thread; if that create fails, `onSend` resolves false and the composer
+// RESTORES the typed message so the user does not lose it.
 
 import { useState } from "react";
 
 interface ComposerProps {
-  onSend: (message: string) => void;
+  // Returns whether the send was accepted. May be async (the first send in a
+  // draft creates the thread first). A false result restores the input text.
+  onSend: (message: string) => boolean | Promise<boolean>;
   onCancel: () => void;
   streaming: boolean;
   disabled: boolean;
@@ -20,8 +26,12 @@ export function Composer(props: ComposerProps): React.ReactElement {
   const submit = (): void => {
     const trimmed = value.trim();
     if (trimmed === "" || streaming || disabled) return;
-    onSend(trimmed);
+    // Clear optimistically for a responsive feel; restore if the send is
+    // rejected (e.g. the lazy thread-create failed) so the message isn't lost.
     setValue("");
+    void Promise.resolve(onSend(trimmed)).then((accepted) => {
+      if (!accepted) setValue((current) => (current === "" ? trimmed : current));
+    });
   };
 
   return (
@@ -39,7 +49,9 @@ export function Composer(props: ComposerProps): React.ReactElement {
         value={value}
         disabled={disabled}
         placeholder={
-          disabled ? "Select or create a conversation first" : "Type a message…"
+          disabled
+            ? "Start a new conversation to begin"
+            : "Ask Aria anything about your wedding…"
         }
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {

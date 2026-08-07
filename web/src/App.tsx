@@ -28,6 +28,7 @@ import {
   type ChatMessage,
 } from "./lib/conversation.js";
 import { startChatStream } from "./lib/sseClient.js";
+import { deriveThreadTitle, UNTITLED_PLACEHOLDER } from "./lib/title.js";
 import {
   createThread,
   getThread,
@@ -60,13 +61,23 @@ export function App(): React.ReactElement {
   if (token === null) {
     return (
       <div className="app app--gate">
-        <h1>Wedding Planner</h1>
-        <TokenGate
-          onSubmit={(t) => {
-            storeToken(t);
-            setToken(t);
-          }}
-        />
+        <div className="gate">
+          <div className="gate__brand">
+            <span className="wordmark__mark wordmark__mark--large" aria-hidden="true">
+              A
+            </span>
+            <h1 className="gate__title">Wedding Planner</h1>
+            <p className="gate__lede">
+              Meet Aria — your calm, well-sourced companion for planning the day.
+            </p>
+          </div>
+          <TokenGate
+            onSubmit={(t) => {
+              storeToken(t);
+              setToken(t);
+            }}
+          />
+        </div>
       </div>
     );
   }
@@ -92,6 +103,14 @@ function Conversation(props: ConversationProps): React.ReactElement {
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  // BUG 1 (lazy-create): a brand-new conversation is a UI-only DRAFT until the
+  // first message is sent. `draft` true means "New conversation" is prepared
+  // (transcript cleared, composer enabled) but NO server row exists yet — the
+  // thread is created with a derived title on the first send so the title
+  // PERSISTS (the backend only accepts a title at creation; there is no update
+  // route). A truly-nothing-selected state is `draft === false && currentThreadId
+  // === null`, which still blocks the composer.
+  const [draft, setDraft] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -99,6 +118,10 @@ function Conversation(props: ConversationProps): React.ReactElement {
   // The AbortController for the in-flight stream (CANCEL seam). A ref so cancel
   // can reach the live controller without a re-render dependency.
   const controllerRef = useRef<AbortController | null>(null);
+  // Guards the lazy thread-creation on the first send so rapid double-sends
+  // cannot create two server threads (a ref: it must gate synchronously, before
+  // any re-render, and is not itself rendered).
+  const creatingRef = useRef(false);
 
   // Update the current (last) assistant turn via a pure reducer.
   const updateCurrentTurn = useCallback(
@@ -127,17 +150,16 @@ function Conversation(props: ConversationProps): React.ReactElement {
     void refreshThreads();
   }, [refreshThreads]);
 
-  const handleCreate = useCallback(async (): Promise<void> => {
-    try {
-      const thread = await createThread({ baseUrl: BASE_URL, token });
-      setThreads((prev) => [thread, ...prev]);
-      setCurrentThreadId(thread.id);
-      setMessages([]);
-      setNotice(null);
-    } catch (err) {
-      handleApiError(err, onSignOut, setNotice);
-    }
-  }, [token, onSignOut]);
+  // "+ New conversation" — prepare a UI DRAFT. No server call yet: the thread is
+  // created lazily on the first send (with a title derived from that message) so
+  // the title persists. Cancels any in-flight stream and resets the transcript.
+  const handleCreate = useCallback((): void => {
+    controllerRef.current?.abort();
+    setDraft(true);
+    setCurrentThreadId(null);
+    setMessages([]);
+    setNotice(null);
+  }, []);
 
   // RESUME / RECONNECT: select a thread and re-fetch its state. (History
   // rehydration is bounded by the backend contract; for 9c we re-fetch the
@@ -150,6 +172,7 @@ function Conversation(props: ConversationProps): React.ReactElement {
       controllerRef.current?.abort();
       try {
         const thread = await getThread({ baseUrl: BASE_URL, token }, threadId);
+        setDraft(false); // selecting a real thread discards any pending draft.
         setCurrentThreadId(thread.id);
         setMessages([]);
         setNotice(null);
@@ -160,15 +183,11 @@ function Conversation(props: ConversationProps): React.ReactElement {
     [token, onSignOut]
   );
 
-  // Start a chat stream for `message` on the current thread. Shared by SEND and
-  // RETRY. Appends a user message (unless retrying) + a fresh assistant turn,
-  // then wires the typed handlers into the reducer.
-  const runTurn = useCallback(
-    (message: string, opts?: { appendUser?: boolean }): void => {
-      const threadId = currentThreadId;
-      if (threadId === null || streaming) return;
-
-      const appendUser = opts?.appendUser ?? true;
+  // Start a chat stream on a KNOWN thread id. Shared internals of SEND / RETRY:
+  // appends a user message (unless retrying) + a fresh assistant turn, then wires
+  // the typed handlers into the reducer.
+  const streamTurn = useCallback(
+    (threadId: string, message: string, appendUser: boolean): void => {
       const turnId = nextId("assistant");
 
       setMessages((prev) => {
@@ -232,13 +251,56 @@ function Conversation(props: ConversationProps): React.ReactElement {
         void refreshThreads();
       });
     },
-    [
-      currentThreadId,
-      streaming,
-      token,
-      updateCurrentTurn,
-      refreshThreads,
-    ]
+    [token, updateCurrentTurn, refreshThreads]
+  );
+
+  // SEND. Starts a turn on the current thread. If the conversation is a DRAFT
+  // (no server row yet), it lazily creates the thread FIRST — using a title
+  // derived from this first message so the title PERSISTS — then streams the
+  // turn on the new id. Subsequent sends stream directly. Guarded so a rapid
+  // double-send cannot create two threads or overlap streams.
+  const runTurn = useCallback(
+    (message: string): boolean | Promise<boolean> => {
+      if (streaming || creatingRef.current) return false;
+
+      // Existing thread: stream directly (accepted synchronously).
+      if (currentThreadId !== null && !draft) {
+        streamTurn(currentThreadId, message, true);
+        return true;
+      }
+
+      // No thread and no draft -> nothing to send to (rejected).
+      if (!draft) return false;
+
+      // Draft: create the server thread with a derived title, then stream. The
+      // returned promise resolves false on failure so the composer restores the
+      // typed message (nothing is lost).
+      creatingRef.current = true;
+      const title = deriveThreadTitle(message) ?? UNTITLED_PLACEHOLDER;
+      return (async (): Promise<boolean> => {
+        try {
+          const thread = await createThread(
+            { baseUrl: BASE_URL, token },
+            { title }
+          );
+          setThreads((prev) => [thread, ...prev]);
+          setDraft(false);
+          setCurrentThreadId(thread.id);
+          setNotice(null);
+          // Stream the first turn on the freshly created thread.
+          streamTurn(thread.id, message, true);
+          return true;
+        } catch (err) {
+          // Keep the draft so the user can retry; surface a user-safe notice
+          // (401 signs out). The composer restores the message on `false`.
+          handleApiError(err, onSignOut, setNotice);
+          return false;
+        } finally {
+          creatingRef.current = false;
+        }
+      })();
+    },
+    [streaming, currentThreadId, draft, token, streamTurn, onSignOut]
   );
 
   // CANCEL: abort the in-flight stream. The finally-block marks the turn
@@ -248,24 +310,43 @@ function Conversation(props: ConversationProps): React.ReactElement {
   }, []);
 
   // RETRY: re-issue the last message WITHOUT appending a duplicate user bubble.
+  // Retry only ever fires on an EXISTING turn, so the thread already exists.
   const handleRetry = useCallback(
     (sourceMessage: string): void => {
-      runTurn(sourceMessage, { appendUser: false });
+      if (currentThreadId === null || streaming) return;
+      streamTurn(currentThreadId, sourceMessage, false);
     },
-    [runTurn]
+    [currentThreadId, streaming, streamTurn]
   );
+
+  // The composer is usable when there is a real thread OR an unsaved draft; a
+  // truly-nothing state (no thread, no draft) still blocks input.
+  const composerDisabled = currentThreadId === null && !draft;
 
   return (
     <div className="app app--conversation">
       <header className="app__header">
-        <h1>Wedding Planner</h1>
-        <button type="button" onClick={onSignOut} data-testid="sign-out">
+        <div className="wordmark">
+          <span className="wordmark__mark" aria-hidden="true">
+            A
+          </span>
+          <span className="wordmark__text">
+            <span className="wordmark__name">Wedding Planner</span>
+            <span className="wordmark__tagline">with Aria</span>
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={onSignOut}
+          data-testid="sign-out"
+          className="btn btn--ghost"
+        >
           Sign out
         </button>
       </header>
 
       {notice !== null ? (
-        <div className="app__notice" data-testid="notice">
+        <div className="app__notice" data-testid="notice" role="alert">
           {notice}
         </div>
       ) : null}
@@ -275,9 +356,10 @@ function Conversation(props: ConversationProps): React.ReactElement {
           threads={threads}
           currentThreadId={currentThreadId}
           onSelect={(id) => void handleSelect(id)}
-          onCreate={() => void handleCreate()}
+          onCreate={handleCreate}
           onRefresh={() => void refreshThreads()}
           busy={streaming}
+          draft={draft}
         />
 
         <main className="app__main">
@@ -290,7 +372,7 @@ function Conversation(props: ConversationProps): React.ReactElement {
             onSend={(m) => runTurn(m)}
             onCancel={handleCancel}
             streaming={streaming}
-            disabled={currentThreadId === null}
+            disabled={composerDisabled}
           />
         </main>
       </div>

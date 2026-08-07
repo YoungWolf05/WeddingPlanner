@@ -12,7 +12,8 @@
 
 import { expect, test } from "@playwright/test";
 import { TOKEN_INVALID, TOKEN_USER, TOKEN_USER2 } from "./fixtures/auth.js";
-import { createThread, signInWith } from "./helpers.js";
+import { createThread, sendMessage, signInWith } from "./helpers.js";
+import { SUPPORTED_ANSWER } from "./fixtures/scripted.js";
 
 test.describe("unauthorized access", () => {
   test("invalid bearer token: generic auth failure, no thread list, no secret leak", async ({
@@ -46,14 +47,21 @@ test.describe("unauthorized access", () => {
   test("cross-owner: user2 cannot access user1's thread (identical 404, no leak)", async ({
     page,
   }) => {
-    // User1 creates a thread; capture its server-issued id from the DOM.
+    // User1 creates a conversation. LAZY-CREATE (BUG 1 fix): the server thread is
+    // created on the FIRST send, so we send a message to persist a REAL thread,
+    // then capture its server-issued id from the active DOM item (the pre-send
+    // draft carries data-thread-id="draft", not a real id).
     await signInWith(page, TOKEN_USER);
     await createThread(page);
+    await sendMessage(page, "recommend a venue");
+    await expect(
+      page.getByTestId("message-assistant").filter({ hasText: SUPPORTED_ANSWER })
+    ).toBeVisible();
     const user1ThreadId = await page
-      .getByTestId("thread-item")
-      .first()
+      .locator('[data-testid="thread-item"][aria-current="true"]')
       .getAttribute("data-thread-id");
     expect(user1ThreadId).not.toBeNull();
+    expect(user1ThreadId).not.toBe("draft");
 
     // Sign out and sign in as user2.
     await page.getByTestId("sign-out").click();

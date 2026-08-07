@@ -3,6 +3,7 @@
 // Threads come from GET /threads (owner-scoped server-side). Selecting a thread
 // resumes it. `thread_id` is a server-issued conversation key, never identity.
 
+import { threadTitleLabel, UNTITLED_PLACEHOLDER } from "../lib/title.js";
 import type { Thread } from "../lib/threadsApi.js";
 
 interface ThreadListProps {
@@ -12,11 +13,17 @@ interface ThreadListProps {
   onCreate: () => void;
   onRefresh: () => void;
   busy: boolean;
+  // A brand-new, not-yet-persisted conversation (BUG 1: lazy-create). When
+  // present it is rendered as the active item at the top of the list with a
+  // placeholder title; it becomes a real server thread on the first send.
+  draft: boolean;
 }
 
 export function ThreadList(props: ThreadListProps): React.ReactElement {
-  const { threads, currentThreadId, onSelect, onCreate, onRefresh, busy } =
+  const { threads, currentThreadId, onSelect, onCreate, onRefresh, busy, draft } =
     props;
+
+  const hasItems = draft || threads.length > 0;
 
   return (
     <aside className="threads" data-testid="thread-list">
@@ -38,28 +45,51 @@ export function ThreadList(props: ThreadListProps): React.ReactElement {
           Refresh
         </button>
       </div>
-      {threads.length === 0 ? (
-        <div className="threads__empty">No conversations yet.</div>
+      {!hasItems ? (
+        <div className="threads__empty">
+          No conversations yet. Start one to see it here.
+        </div>
       ) : (
         <ul className="threads__list">
-          {threads.map((thread) => (
-            <li key={thread.id}>
-              <button
-                type="button"
-                className={
-                  thread.id === currentThreadId
-                    ? "threads__item threads__item--active"
-                    : "threads__item"
-                }
-                onClick={() => onSelect(thread.id)}
+          {draft ? (
+            // The unsaved draft: an active, non-selectable item (there is no
+            // server id yet). It keeps `new-thread + first send yields a listed
+            // thread` intact and shows the placeholder until the title is set.
+            <li key="__draft__">
+              <span
+                className="threads__item threads__item--active threads__item--draft"
                 data-testid="thread-item"
-                data-thread-id={thread.id}
-                aria-current={thread.id === currentThreadId}
+                data-thread-id="draft"
+                aria-current={true}
               >
-                {thread.title ?? "(untitled)"}
-              </button>
+                <span className="threads__title">{UNTITLED_PLACEHOLDER}</span>
+                <span className="threads__badge">Draft</span>
+              </span>
             </li>
-          ))}
+          ) : null}
+          {threads.map((thread) => {
+            const active = !draft && thread.id === currentThreadId;
+            return (
+              <li key={thread.id}>
+                <button
+                  type="button"
+                  className={
+                    active
+                      ? "threads__item threads__item--active"
+                      : "threads__item"
+                  }
+                  onClick={() => onSelect(thread.id)}
+                  data-testid="thread-item"
+                  data-thread-id={thread.id}
+                  aria-current={active}
+                >
+                  <span className="threads__title">
+                    {threadTitleLabel(thread.title)}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </aside>

@@ -1,225 +1,903 @@
+/* Wedding Planner — "Aria" SPA.
+ *
+ * DESIGN DIRECTION: an editorial, warm-romantic wedding-STATIONERY aesthetic —
+ * an elegant invitation suite, not a generic SaaS chat. The boldness is spent in
+ * ONE place: the SIGNATURE ELEMENT — trusted citations rendered as embossed
+ * "source cards" with a gold marker seal. Everything else stays quiet.
+ *
+ * TOKEN SYSTEM
+ *   Palette (named):
+ *     --ivory   #FBF7F4  blush-tinted paper base (not the default cream)
+ *     --blush   #F3E7E4  raised surfaces / cards
+ *     --plum    #3A2438  deep ink — text + headings (not near-black)
+ *     --plum-soft #6E5568 muted text
+ *     --gold    #A87F3F  antique-brass accent — the invitation "foil"
+ *     --rose    #A64F68  warm secondary — the couple's (user) voice
+ *   Type:
+ *     Display: "Fraunces" (characterful serif) — wordmark + headings, restraint.
+ *     Body/UI: "Inter" (clean humanist sans) — everything else.
+ *     Both loaded via a standard Google Fonts <link> in index.html (lightweight;
+ *     no runtime dep; does not trip the zero-creds bundle scan).
+ *   Layout: a full-viewport flex column — fixed header, a two-pane body (elegant
+ *     sidebar + conversation), and ONLY the transcript scrolls.
+ */
+
 :root {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color-scheme: light dark;
-  --border: #d0d0d8;
-  --muted: #6b7280;
-  --accent: #7c3aed;
-  --error: #b91c1c;
-  --ok: #15803d;
+  /* Palette */
+  --ivory: #fbf7f4;
+  --blush: #f3e7e4;
+  --paper: #fffdfb;
+  --plum: #3a2438;
+  --plum-soft: #6e5568;
+  --gold: #a87f3f;
+  --gold-soft: #cbb488;
+  --rose: #a64f68;
+  --rose-ink: #6d2f42;
+
+  --border: #e6d8d3;
+  --border-strong: #d8c6c0;
+  --error: #a4302a;
+  --error-bg: #f6e5e2;
+  --ok: #3f6b4b;
+
+  /* Type */
+  --font-display: "Fraunces", "Iowan Old Style", Georgia, serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Rhythm */
+  --radius: 10px;
+  --radius-lg: 16px;
+  --shadow-card: 0 1px 2px rgba(58, 36, 56, 0.06),
+    0 8px 24px -16px rgba(58, 36, 56, 0.35);
+  --shadow-raised: 0 2px 6px rgba(58, 36, 56, 0.08),
+    0 18px 40px -24px rgba(58, 36, 56, 0.4);
+
+  font-family: var(--font-body);
+  color: var(--plum);
+  color-scheme: light;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
+  height: 100%;
 }
 
+/* The page itself never scrolls (BUG 2): the app shell owns the viewport and the
+ * transcript is the only scroller. */
+body {
+  background: var(--ivory);
+  color: var(--plum);
+  /* A faint paper texture: two soft radial washes of blush + gold. Cheap, static,
+   * and evocative of pressed stationery without imagery. */
+  background-image:
+    radial-gradient(120% 80% at 100% 0%, rgba(203, 180, 136, 0.14), transparent 60%),
+    radial-gradient(120% 80% at 0% 100%, rgba(166, 79, 104, 0.08), transparent 55%);
+  background-attachment: fixed;
+}
+
+#root {
+  height: 100%;
+}
+
+/* ---- app shell: full-viewport flex column (BUG 2) ------------------------- */
+
 .app {
-  max-width: 1100px;
+  height: 100vh; /* fallback */
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.app--conversation {
+  max-width: 1180px;
   margin: 0 auto;
-  padding: 1rem;
+  padding: 0 clamp(0.75rem, 3vw, 2rem);
 }
 
 .app__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 0.5rem;
+  gap: 1rem;
+  padding: 1.1rem 0 0.9rem;
+  border-bottom: 1px solid var(--gold-soft);
+  position: relative;
+  flex: none;
 }
+
+/* The signature hairline: a gold rule that reads as invitation foil. */
+.app__header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--gold) 20%,
+    var(--gold) 80%,
+    transparent
+  );
+  opacity: 0.5;
+}
+
+/* ---- wordmark ------------------------------------------------------------- */
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.wordmark__mark {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  border: 1.5px solid var(--gold);
+  color: var(--gold);
+  background: var(--paper);
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 1.35rem;
+  line-height: 1;
+  font-optical-sizing: auto;
+  box-shadow: inset 0 0 0 3px rgba(168, 127, 63, 0.08);
+}
+
+.wordmark__mark--large {
+  width: 4rem;
+  height: 4rem;
+  font-size: 2.2rem;
+}
+
+.wordmark__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
+}
+
+.wordmark__name {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.35rem, 2.4vw, 1.7rem);
+  letter-spacing: 0.01em;
+  color: var(--plum);
+}
+
+.wordmark__tagline {
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-top: 0.15rem;
+}
+
+/* ---- notice -------------------------------------------------------------- */
+
+.app__notice {
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid #e6c3bd;
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius);
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+  flex: none;
+}
+
+/* ---- body: sidebar + main ------------------------------------------------ */
 
 .app__body {
   display: grid;
-  grid-template-columns: 240px 1fr;
-  gap: 1rem;
-  margin-top: 1rem;
+  grid-template-columns: 264px 1fr;
+  gap: clamp(0.75rem, 2vw, 1.5rem);
+  padding: 1rem 0 1.1rem;
+  flex: 1 1 auto;
+  min-height: 0; /* the classic flexbox scroll fix: let children own overflow. */
 }
 
-.app__notice {
-  background: #fef3c7;
-  color: #92400e;
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  margin-top: 0.5rem;
+/* ---- sidebar (threads) --------------------------------------------------- */
+
+.threads {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .threads__actions {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  flex: none;
 }
 
 .threads__list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0.15rem;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.35rem;
+  overflow-y: auto; /* the sidebar scrolls independently when long. */
+  min-height: 0;
+}
+
+.threads__empty {
+  color: var(--plum-soft);
+  font-size: 0.88rem;
+  padding: 0.6rem 0.2rem;
+  font-style: italic;
 }
 
 .threads__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   width: 100%;
   text-align: left;
-  padding: 0.4rem 0.5rem;
+  padding: 0.6rem 0.7rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--plum);
   cursor: pointer;
+  font: inherit;
+  font-size: 0.92rem;
+  transition: border-color 0.15s ease, background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.threads__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threads__item:hover {
+  border-color: var(--gold-soft);
+  box-shadow: var(--shadow-card);
 }
 
 .threads__item--active {
-  border-color: var(--accent);
+  border-color: var(--gold);
+  box-shadow: inset 3px 0 0 var(--gold);
   font-weight: 600;
 }
+
+.threads__item--draft {
+  cursor: default;
+  border-style: dashed;
+  color: var(--plum-soft);
+}
+
+.threads__badge {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+  border: 1px solid var(--gold-soft);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  flex: none;
+}
+
+/* ---- main: transcript + composer ---------------------------------------- */
 
 .app__main {
   display: flex;
   flex-direction: column;
-  min-height: 60vh;
+  min-height: 0; /* allow the inner transcript overflow to engage (BUG 2). */
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
 }
 
+/* The ONLY scroll region (BUG 2): the transcript. Auto-scroll to newest is
+ * driven by an effect in the Transcript component. */
 .transcript {
-  flex: 1;
+  flex: 1 1 auto;
   overflow-y: auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  padding: 0.5rem 0;
+  gap: 1rem;
+  padding: 1.3rem clamp(1rem, 2.5vw, 1.9rem);
+  scroll-behavior: smooth;
 }
+
+.transcript__empty {
+  margin: auto;
+  max-width: 26rem;
+  text-align: center;
+  color: var(--plum-soft);
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-style: italic;
+  line-height: 1.5;
+}
+
+/* ---- message bubbles: stationery cards ---------------------------------- */
 
 .message {
-  padding: 0.6rem 0.8rem;
-  border-radius: 8px;
-  max-width: 90%;
+  max-width: min(92%, 46rem);
+  padding: 0.85rem 1.05rem;
+  border-radius: var(--radius-lg);
+  line-height: 1.6;
+  font-size: 0.96rem;
 }
 
+/* The couple's voice: a warm rose note, foil-cornered. */
 .message--user {
   align-self: flex-end;
-  background: var(--accent);
-  color: white;
+  background: linear-gradient(180deg, #b25b73, var(--rose));
+  color: #fff;
   white-space: pre-wrap;
+  border-bottom-right-radius: 4px;
+  box-shadow: var(--shadow-card);
 }
 
+/* Aria's voice: a letterpress note card with a deckled gold left edge. */
 .message--assistant {
   align-self: flex-start;
+  background: var(--paper);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--gold-soft);
+  border-bottom-left-radius: 4px;
+  box-shadow: var(--shadow-card);
 }
 
 .message__text {
   white-space: pre-wrap;
 }
 
+/* Streaming caret. */
+.message__cursor {
+  display: inline-block;
+  color: var(--gold);
+  font-weight: 700;
+  margin-left: 1px;
+  animation: caret-blink 1.05s steps(1) infinite;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 .message__error {
   color: var(--error);
-  margin-top: 0.5rem;
+  margin-top: 0.65rem;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
 }
 
 .message__canceled {
-  color: var(--muted);
-  margin-top: 0.5rem;
+  color: var(--plum-soft);
+  margin-top: 0.65rem;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
 }
+
+/* ---- SIGNATURE: source cards (citations) -------------------------------- */
 
 .citations {
-  margin-top: 0.5rem;
-  font-size: 0.85rem;
-  border-top: 1px dashed var(--border);
-  padding-top: 0.4rem;
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
 }
 
-.citations--insufficient {
-  color: #92400e;
+.citations__header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
 }
 
-.citations__list {
-  margin: 0.25rem 0 0;
-  padding-left: 1.2rem;
-}
-
-.citations__marker {
+.citations__eyebrow {
+  font-size: 0.68rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--gold);
   font-weight: 600;
 }
 
-.citations__meta {
-  color: var(--muted);
+.citations__count {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  color: var(--plum-soft);
 }
 
+.citations__list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* The card: an embossed stationery chip. */
+.source-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  background: linear-gradient(180deg, var(--paper), var(--blush));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+
+/* The gold marker seal — the memorable detail. */
+.source-card__seal {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 1.9rem;
+  height: 1.9rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, #d9bd85, var(--gold));
+  color: #43310f;
+  font-weight: 700;
+  font-size: 0.78rem;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(58, 36, 56, 0.25);
+}
+
+.source-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.source-card__source {
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: var(--plum);
+  overflow-wrap: anywhere;
+}
+
+.source-card__meta {
+  font-size: 0.76rem;
+  color: var(--plum-soft);
+}
+
+/* Insufficient evidence: a distinct, quiet "no seal" state. */
+.citations--insufficient {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  background: #f7efe0;
+  border: 1px dashed var(--gold-soft);
+  border-radius: var(--radius);
+  padding: 0.7rem 0.85rem;
+  color: #7a5b1f;
+  font-size: 0.9rem;
+}
+
+.citations__seal--muted {
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  border: 1px dashed var(--gold);
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 3px,
+    rgba(168, 127, 63, 0.18) 3px,
+    rgba(168, 127, 63, 0.18) 6px
+  );
+}
+
+/* ---- tool progress ------------------------------------------------------- */
+
 .tools {
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
   font-size: 0.85rem;
+}
+
+.tools__header {
+  font-size: 0.68rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--plum-soft);
+  margin-bottom: 0.35rem;
 }
 
 .tools__list {
   list-style: none;
-  margin: 0.25rem 0 0;
+  margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.tools__item {
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  background: var(--ivory);
+  border: 1px solid var(--border);
+  color: var(--plum-soft);
+}
+
+.tools__item--result {
+  border-color: var(--gold-soft);
 }
 
 .tools__item--error {
   color: var(--error);
+  background: var(--error-bg);
+  border-color: #e6c3bd;
 }
 
+.tools__phase {
+  font-weight: 600;
+  color: var(--plum);
+  text-transform: capitalize;
+}
+
+.tools__name {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  color: var(--rose-ink);
+}
+
+.tools__args,
+.tools__content {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  color: var(--plum-soft);
+  overflow-wrap: anywhere;
+}
+
+/* ---- artifacts ----------------------------------------------------------- */
+
 .artifacts {
-  margin-top: 0.5rem;
-  font-size: 0.9rem;
+  margin-top: 0.8rem;
+}
+
+.artifacts__header {
+  font-size: 0.68rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--plum-soft);
+  margin-bottom: 0.4rem;
 }
 
 .artifact {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.5rem;
-  margin-top: 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.85rem;
+  margin-top: 0.5rem;
+  background: linear-gradient(180deg, var(--paper), var(--blush));
+  box-shadow: var(--shadow-card);
+}
+
+.artifact--grounded {
+  border-left: 3px solid var(--gold);
 }
 
 .artifact__kind {
-  font-size: 0.75rem;
+  font-size: 0.66rem;
   text-transform: uppercase;
-  color: var(--muted);
+  letter-spacing: 0.18em;
+  color: var(--gold);
+  font-weight: 600;
 }
+
+.artifact__evidence {
+  font-size: 0.82rem;
+  color: var(--plum-soft);
+  margin-top: 0.2rem;
+}
+
+.artifact__answer {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  line-height: 1.55;
+  color: var(--plum);
+}
+
+.artifact__json {
+  margin: 0.4rem 0 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  color: var(--plum-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- composer ------------------------------------------------------------ */
 
 .composer {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.6rem;
+  align-items: flex-end;
+  padding: 0.85rem clamp(1rem, 2.5vw, 1.9rem) 1.05rem;
   border-top: 1px solid var(--border);
-  padding-top: 0.75rem;
+  background: linear-gradient(180deg, var(--paper), var(--blush));
+  flex: none;
 }
 
 .composer__input {
   flex: 1;
   min-height: 3rem;
+  max-height: 40vh;
   resize: vertical;
   font: inherit;
-  padding: 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  font-size: 0.96rem;
+  line-height: 1.5;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--plum);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.token-gate {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  max-width: 420px;
+.composer__input::placeholder {
+  color: var(--plum-soft);
+  opacity: 0.75;
 }
 
-.token-gate__hint {
-  color: var(--muted);
-  font-size: 0.85rem;
-  margin: 0;
+.composer__input:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(168, 127, 63, 0.18);
 }
+
+.composer__input:disabled {
+  background: var(--ivory);
+  color: var(--plum-soft);
+}
+
+/* ---- buttons ------------------------------------------------------------- */
 
 button {
   font: inherit;
-  padding: 0.4rem 0.7rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: #f3f4f6;
+  font-size: 0.9rem;
+  padding: 0.55rem 0.95rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--paper);
+  color: var(--plum);
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.05s ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--gold-soft);
+  box-shadow: var(--shadow-card);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Visible keyboard focus everywhere. */
+:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Primary action (send) — the one filled button, in plum ink. */
+.composer__send {
+  background: var(--plum);
+  color: var(--ivory);
+  border-color: var(--plum);
+  font-weight: 600;
+  padding-inline: 1.4rem;
+}
+
+.composer__send:hover:not(:disabled) {
+  background: #4a2f47;
+  border-color: #4a2f47;
+}
+
+.composer__cancel {
+  background: var(--paper);
+  color: var(--error);
+  border-color: #e6c3bd;
+  font-weight: 600;
+  padding-inline: 1.2rem;
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--plum-soft);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  color: var(--plum);
+  background: var(--blush);
+  box-shadow: none;
+}
+
+/* "+ New conversation" — a soft-gold outlined action. */
+.threads__actions [data-testid="new-thread"] {
+  border-color: var(--gold-soft);
+  color: var(--rose-ink);
+  font-weight: 600;
+}
+
+.threads__actions [data-testid="new-thread"]:hover:not(:disabled) {
+  background: var(--blush);
+  border-color: var(--gold);
+}
+
+/* Retry buttons inside status rows sit inline and small. */
+.message__error button,
+.message__canceled button {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+/* ---- token gate ---------------------------------------------------------- */
+
+.app--gate {
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.gate {
+  width: 100%;
+  max-width: 26rem;
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-raised);
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.gate__brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.5rem;
+}
+
+.gate__title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: clamp(1.7rem, 5vw, 2.2rem);
+  letter-spacing: 0.01em;
+  margin: 0.3rem 0 0;
+  color: var(--plum);
+}
+
+.gate__lede {
+  margin: 0;
+  color: var(--plum-soft);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  max-width: 22rem;
+}
+
+.token-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.token-gate__label {
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--gold);
+  font-weight: 600;
+}
+
+.token-gate__hint {
+  color: var(--plum-soft);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.token-gate input {
+  font: inherit;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--ivory);
+  color: var(--plum);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.token-gate input:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(168, 127, 63, 0.18);
+}
+
+.token-gate [data-testid="token-submit"] {
+  background: var(--plum);
+  color: var(--ivory);
+  border-color: var(--plum);
+  font-weight: 600;
+  margin-top: 0.25rem;
+}
+
+.token-gate [data-testid="token-submit"]:hover:not(:disabled) {
+  background: #4a2f47;
+  border-color: #4a2f47;
+}
+
+/* ---- responsive: stack the sidebar on narrow screens -------------------- */
+
+@media (max-width: 720px) {
+  .app__body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .threads {
+    max-height: 34vh;
+  }
+
+  .threads__list {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .threads__item {
+    width: auto;
+  }
+
+  .message {
+    max-width: 100%;
+  }
+}
+
+/* ---- reduced motion ------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

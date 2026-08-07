@@ -25,8 +25,11 @@ export function Citations(props: CitationsProps): React.ReactElement | null {
         className="citations citations--insufficient"
         data-testid="evidence-insufficient"
       >
-        <strong>Insufficient evidence.</strong> The assistant could not find
-        trusted sources to ground this answer, so no citations are shown.
+        <span className="citations__seal citations__seal--muted" aria-hidden="true" />
+        <div className="citations__insufficient-body">
+          <strong>Insufficient evidence.</strong> Aria couldn&rsquo;t find trusted
+          sources to ground this answer, so no sources are shown.
+        </div>
       </div>
     );
   }
@@ -35,7 +38,8 @@ export function Citations(props: CitationsProps): React.ReactElement | null {
   return (
     <div className="citations citations--supported" data-testid="citations">
       <div className="citations__header" data-testid="evidence-supported">
-        Sources ({citations.length})
+        <span className="citations__eyebrow">Sources</span>
+        <span className="citations__count">{citations.length}</span>
       </div>
       {citations.length === 0 ? (
         <div className="citations__empty">No citations for this answer.</div>
@@ -44,21 +48,26 @@ export function Citations(props: CitationsProps): React.ReactElement | null {
           {citations.map((c) => (
             <li
               key={c.chunkId}
-              className="citations__item"
+              className="citations__item source-card"
               data-testid="citation-item"
             >
-              <span className="citations__marker" data-testid="citation-marker">
-                [{c.marker}]
-              </span>{" "}
               <span
-                className="citations__source"
-                data-testid="citation-source"
-                title={c.documentId}
+                className="citations__marker source-card__seal"
+                data-testid="citation-marker"
               >
-                {c.sourceUri ?? "(unknown source)"}
-              </span>{" "}
-              <span className="citations__meta">
-                chunk #{c.chunkIndex} · score {c.score.toFixed(3)}
+                [{c.marker}]
+              </span>
+              <span className="source-card__body">
+                <span
+                  className="citations__source source-card__source"
+                  data-testid="citation-source"
+                  title={c.documentId}
+                >
+                  {c.sourceUri ?? "(unknown source)"}
+                </span>
+                <span className="citations__meta source-card__meta">
+                  chunk #{c.chunkIndex} · score {c.score.toFixed(3)}
+                </span>
               </span>
             </li>
           ))}
