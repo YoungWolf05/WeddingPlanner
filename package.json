@@ -11,6 +11,7 @@
     "eval": "tsx src/run-eval.ts",
     "eval:retrieval": "tsx src/run-retrieval-eval.ts",
     "eval:rag": "tsx src/run-rag-eval.ts",
+    "ingest": "tsx src/run-ingest.ts",
     "chain": "tsx src/run-chain.ts",
     "memory": "tsx src/run-memory.ts",
     "chat": "tsx src/cli.ts",

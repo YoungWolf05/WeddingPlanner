@@ -1,4 +1,4 @@
-import { readFile, readdir, mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import {
   type KnowledgeStore,
 } from "./core/knowledge-store.js";
 import { ingestDocuments, createDocumentEmbedder } from "./core/ingestion.js";
+import { loadCorpusDocuments, type CorpusDoc } from "./core/corpus.js";
 import { retrieve, createQueryEmbedder } from "./core/retriever.js";
 import {
   parseRetrievalDataset,
@@ -111,29 +112,12 @@ async function loadDataset(): Promise<RetrievalEvalItem[]> {
   return parseRetrievalDataset(text);
 }
 
-// One corpus document ready to ingest: its repo-relative source_uri (the stable
-// identity key) + its content.
-interface CorpusDoc {
-  sourceUri: string;
-  content: string;
-}
-
-// Load every markdown file under knowledge/corpus/ as a corpus document. The
-// source_uri is the POSIX-style repo-relative path (matches evals/retrieval.jsonl
-// references and how computeDocumentId derives identity).
+// Load every markdown file under knowledge/corpus/ as a corpus document, via the
+// shared loader (src/core/corpus.ts). The source_uri is the POSIX-style
+// repo-relative path (matches evals/retrieval.jsonl references and how
+// computeDocumentId derives identity), and ordering is deterministic.
 async function loadCorpus(): Promise<CorpusDoc[]> {
-  const corpusDir = path.join(repoRoot, "knowledge", "corpus");
-  const entries = await readdir(corpusDir, { withFileTypes: true });
-  const docs: CorpusDoc[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    const abs = path.join(corpusDir, entry.name);
-    const content = await readFile(abs, "utf8");
-    docs.push({ sourceUri: `knowledge/corpus/${entry.name}`, content });
-  }
-  // Deterministic ingestion order.
-  docs.sort((a, b) => a.sourceUri.localeCompare(b.sourceUri));
-  return docs;
+  return loadCorpusDocuments(path.join(repoRoot, "knowledge", "corpus"));
 }
 
 // --- Orchestration ----------------------------------------------------------

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Phase 8 (increment 8a) — GROUNDED GENERATION CORE offline coverage.
 //
@@ -769,5 +769,151 @@ describe("Phase 8 (8c) — answerQuestion low-score pre-generation gate", () => 
 
     expect(result.evidenceStatus).toBe("insufficient");
     expect(control.captured).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// END-TO-END SCOPED regression (Option 1 public-unowned fix) — the acceptance
+// criterion. This exercises the REAL retrieve() (default retrieveFn) + REAL
+// resolveCitations() over a REAL sqlite-vec store, under a NON-NULL ownerId, with
+// ONLY the generation seam scripted. It is the exact gap the reviewer flagged:
+// the eval runners retrieve UNSCOPED, so eval-green evidence could NOT catch the
+// ingest -> grounded-serve bug. This test runs SCOPED and proves a PUBLIC
+// (unowned) corpus yields >= 1 TRUSTED citation under an authenticated owner,
+// while a DIFFERENT non-null owner's chunk is never cited.
+describe("Phase 8 — end-to-end SCOPED grounded regression (real retrieve + real resolveCitations)", () => {
+  const DIM = 8;
+
+  function oneHot(slot: number): number[] {
+    const v = new Array<number>(DIM).fill(0);
+    v[slot % DIM] = 1;
+    return v;
+  }
+
+  // A real store over a temp DB (removed in afterEach) + a deterministic fake
+  // QUERY embedder. NO network. The default retrieveFn (real retrieve) + default
+  // resolveCitations run for real; only generateFn is scripted.
+  let tempDir: string;
+  let realStore: KnowledgeStore;
+
+  // These corpus docs are UNOWNED (ownerId=null) — mirroring `npm run ingest`,
+  // plus one owned by a DIFFERENT owner to prove cross-owner exclusion.
+  const CORPUS = [
+    { sourceUri: "knowledge/corpus/public-venues.md", content: "outdoor garden venues are popular for weddings", slot: 0, owner: null as string | null },
+    { sourceUri: "knowledge/corpus/other-owner.md", content: "some other owner private catering note", slot: 1, owner: "owner-B" as string | null },
+  ];
+
+  function slotFor(content: string): number {
+    const found = CORPUS.find((d) => content.includes(d.content));
+    return found ? found.slot : DIM - 1;
+  }
+
+  const docEmbedder = {
+    embedDocuments(texts: string[]): Promise<number[][]> {
+      return Promise.resolve(texts.map((t) => oneHot(slotFor(t))));
+    },
+  };
+
+  // Query embedder points at slot 0 (the PUBLIC doc) as the nearest neighbor.
+  const publicQueryEmbedder = {
+    embedQuery(_t: string): Promise<number[]> {
+      return Promise.resolve(oneHot(0));
+    },
+  };
+
+  beforeEach(async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const pathMod = await import("node:path");
+    const { createKnowledgeStore } = await import("../src/core/knowledge-store.js");
+    const { ingestDocuments } = await import("../src/core/ingestion.js");
+    tempDir = await mkdtemp(pathMod.join(tmpdir(), "wp-8-e2e-scoped-"));
+    realStore = createKnowledgeStore({
+      dbPath: pathMod.join(tempDir, "k.sqlite"),
+      embeddingDim: DIM,
+    });
+    await ingestDocuments({
+      store: realStore,
+      embedder: docEmbedder,
+      documents: CORPUS.map((d) => ({
+        content: d.content,
+        sourceUri: d.sourceUri,
+        ownerId: d.owner,
+      })),
+      chunking: { chunkSize: 1000, chunkOverlap: 0 },
+    });
+  });
+
+  afterEach(async () => {
+    realStore.close();
+    const { rm } = await import("node:fs/promises");
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("PUBLIC corpus yields a TRUSTED citation under a NON-NULL authenticated owner (acceptance criterion)", async () => {
+    // The scripted model cites marker 1 (the only usable/public entry). Because
+    // generateFn is injected, createChatModel is never called — but retrieve() and
+    // resolveCitations() are the REAL functions running under ownerId scope.
+    const result = await answerQuestion({
+      store: realStore,
+      queryEmbedder: publicQueryEmbedder,
+      query: "recommend a wedding venue",
+      k: 5,
+      ownerId: "authenticated-user-A",
+      // Score for a distance-0 hit is 1, well above the default minScore.
+      generateFn: () =>
+        Promise.resolve({
+          answer: "Consider an outdoor garden venue.",
+          citations: [1],
+          insufficientEvidence: false,
+        }),
+    });
+
+    // NEW behavior (the regression guard): the public corpus was retrieved AND a
+    // trusted citation resolved UNDER a non-null owner scope. OLD rule => zero.
+    expect(result.evidenceStatus).toBe("supported");
+    expect(result.resolvedCitations.length).toBeGreaterThanOrEqual(1);
+    const cited = result.resolvedCitations[0]!;
+    expect(cited.sourceUri).toBe("knowledge/corpus/public-venues.md");
+    // The citation's ownerId is the app-owned (null/public) value from the store.
+    expect(cited.ownerId).toBeNull();
+    // The retrieved set (real retrieve under scope) contains the public doc.
+    expect(result.retrieved.map((r) => r.sourceUri)).toContain(
+      "knowledge/corpus/public-venues.md"
+    );
+  });
+
+  it("a DIFFERENT non-null owner's chunk is EXCLUDED from retrieval (never citable) under the owner scope", async () => {
+    // Query the OWNER-B slot under owner-A's scope. Real retrieve() must drop the
+    // owner-B chunk (cross-owner isolation), so it is never in the markerMap and
+    // can never be cited even if the model tries to.
+    const ownerBQueryEmbedder = {
+      embedQuery(_t: string): Promise<number[]> {
+        return Promise.resolve(oneHot(1));
+      },
+    };
+    const result = await answerQuestion({
+      store: realStore,
+      queryEmbedder: ownerBQueryEmbedder,
+      query: "catering",
+      k: 5,
+      ownerId: "authenticated-user-A",
+      // The model (adversarially) tries to cite marker 1 AND marker 2.
+      generateFn: () =>
+        Promise.resolve({
+          answer: "grounded",
+          citations: [1, 2],
+          insufficientEvidence: false,
+        }),
+    });
+
+    // owner-B's doc must NOT appear in the retrieved set (isolation preserved).
+    expect(result.retrieved.map((r) => r.sourceUri)).not.toContain(
+      "knowledge/corpus/other-owner.md"
+    );
+    // No resolved citation may reference owner-B's document.
+    for (const c of result.resolvedCitations) {
+      expect(c.sourceUri).not.toBe("knowledge/corpus/other-owner.md");
+    }
   });
 });

@@ -264,11 +264,11 @@ describe("Phase 7 (7e) — retrieve (core)", () => {
     expect(e.message).toContain("dimension mismatch");
   });
 
-  it("owner-scoped retrieval restricts results to the requested owner", async () => {
+  it("owner-scoped retrieval restricts results to the requester's OWNED docs + PUBLIC docs", async () => {
     await ingestCorpus(store);
-    // Query at slot 0 (owner-1's a.md is nearest). Scope to owner-2: only
-    // owner-2's documents may appear (c.md), and NONE from owner-1 or the
-    // unowned d.md.
+    // Query at slot 0 (owner-1's a.md is nearest). Scope to owner-2: owner-2's
+    // OWNED docs (c.md) AND the PUBLIC/unowned d.md are visible (Option 1
+    // public-unowned rule); NO owner-1 docs (cross-owner isolation preserved).
     const results = await retrieve({
       store,
       queryEmbedder: makeQueryEmbedder(0),
@@ -278,17 +278,22 @@ describe("Phase 7 (7e) — retrieve (core)", () => {
     });
     expect(results.length).toBeGreaterThan(0);
     for (const r of results) {
-      expect(r.ownerId).toBe("owner-2");
+      // Every hit is either owner-2's own doc or a PUBLIC (null-owner) doc.
+      expect(r.ownerId === "owner-2" || r.ownerId === null).toBe(true);
     }
     const uris = results.map((r) => r.sourceUri);
-    expect(uris).toContain("knowledge/corpus/c.md");
+    expect(uris).toContain("knowledge/corpus/c.md"); // owner-2's owned doc
+    expect(uris).toContain("knowledge/corpus/d.md"); // PUBLIC (unowned) doc — NEW
+    // owner-1's OWNED docs remain private (isolation preserved).
     expect(uris).not.toContain("knowledge/corpus/a.md");
     expect(uris).not.toContain("knowledge/corpus/b.md");
-    expect(uris).not.toContain("knowledge/corpus/d.md");
   });
 
-  it("owner-scoped retrieval returns [] when the owner has no documents", async () => {
+  it("owner-scoped retrieval still returns PUBLIC docs when the owner has no OWNED docs", async () => {
     await ingestCorpus(store);
+    // An owner with zero OWNED documents still sees PUBLIC (unowned) docs: d.md is
+    // the only unowned doc, so exactly it is returned (NEW public-unowned rule;
+    // OLD rule returned []).
     const results = await retrieve({
       store,
       queryEmbedder: makeQueryEmbedder(0),
@@ -296,7 +301,127 @@ describe("Phase 7 (7e) — retrieve (core)", () => {
       k: 5,
       ownerId: "owner-does-not-exist",
     });
-    expect(results).toEqual([]);
+    expect(results.map((r) => r.sourceUri)).toEqual(["knowledge/corpus/d.md"]);
+    expect(results.every((r) => r.ownerId === null)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PUBLIC-UNOWNED authorization rule (Option 1 fix). A regression guard for the
+// ingest -> grounded-serve bug: the corpus is ingested UNOWNED (ownerId=null),
+// but the grounded server ALWAYS scopes retrieval to a non-null authenticated
+// ownerId. The OLD filter dropped null-owner chunks under a scope, so grounded
+// serve returned ZERO corpus hits. NEW rule: an UNOWNED (null) document is
+// PUBLIC — visible under ANY owner scope — while OWNED docs stay private to their
+// owner. These tests exercise the SCOPED path (the eval runners retrieve
+// UNSCOPED, which is exactly why the eval-green evidence could not catch this).
+//
+// A dedicated 3-owner corpus: one PUBLIC doc, one owned by owner-A, one by
+// owner-B, each on its own one-hot slot so KNN order is deterministic.
+const OWNERSHIP_CORPUS: {
+  sourceUri: string;
+  content: string;
+  slot: number;
+  owner: string | null;
+}[] = [
+  { sourceUri: "knowledge/corpus/public.md", content: "public corpus knowledge about venues", slot: 0, owner: null },
+  { sourceUri: "knowledge/corpus/owner-a.md", content: "owner A private note about budget", slot: 1, owner: "owner-A" },
+  { sourceUri: "knowledge/corpus/owner-b.md", content: "owner B private note about catering", slot: 2, owner: "owner-B" },
+];
+
+function slotForOwnershipContent(content: string): number {
+  const found = OWNERSHIP_CORPUS.find((d) => content.includes(d.content));
+  return found ? found.slot : DIM - 1;
+}
+
+function makeOwnershipDocEmbedder(): DocumentEmbedder {
+  return {
+    embedDocuments(texts: string[]): Promise<number[][]> {
+      return Promise.resolve(texts.map((t) => oneHot(slotForOwnershipContent(t))));
+    },
+  };
+}
+
+async function ingestOwnershipCorpus(s: KnowledgeStore): Promise<void> {
+  await ingestDocuments({
+    store: s,
+    embedder: makeOwnershipDocEmbedder(),
+    documents: OWNERSHIP_CORPUS.map((d) => ({
+      content: d.content,
+      sourceUri: d.sourceUri,
+      ownerId: d.owner,
+    })),
+    chunking: { chunkSize: 1000, chunkOverlap: 0 },
+  });
+}
+
+describe("Phase 7 (7e) — PUBLIC-unowned authorization rule (Option 1 fix)", () => {
+  it("under owner-A scope: PUBLIC doc IS returned, owner-A doc IS returned, owner-B doc is NOT (isolation preserved)", async () => {
+    await ingestOwnershipCorpus(store);
+    // k >= corpus size so authorization (not k-underfill) is the only reason a
+    // doc could be absent. Every doc is at distance <= sqrt(2), so all are
+    // candidates; the owner filter is what excludes owner-B.
+    const results = await retrieve({
+      store,
+      queryEmbedder: makeQueryEmbedder(0),
+      query: "venues",
+      k: 5,
+      ownerId: "owner-A",
+    });
+    const uris = results.map((r) => r.sourceUri);
+    // NEW behavior (the regression guard): the PUBLIC (null-owner) doc is visible
+    // under a non-null scope.
+    expect(uris).toContain("knowledge/corpus/public.md");
+    // The requester's own owned doc is visible.
+    expect(uris).toContain("knowledge/corpus/owner-a.md");
+    // Cross-owner isolation preserved: owner-B's owned doc is NEVER visible.
+    expect(uris).not.toContain("knowledge/corpus/owner-b.md");
+    // Every returned chunk is either public (null) or owned by the requester.
+    for (const r of results) {
+      expect(r.ownerId === null || r.ownerId === "owner-A").toBe(true);
+    }
+  });
+
+  it("with NO ownerId scope: all three docs (public + owner-A + owner-B) are returned (unchanged)", async () => {
+    await ingestOwnershipCorpus(store);
+    const results = await retrieve({
+      store,
+      queryEmbedder: makeQueryEmbedder(0),
+      query: "venues",
+      k: 5,
+    });
+    const uris = results.map((r) => r.sourceUri);
+    expect(uris).toContain("knowledge/corpus/public.md");
+    expect(uris).toContain("knowledge/corpus/owner-a.md");
+    expect(uris).toContain("knowledge/corpus/owner-b.md");
+    expect(results.length).toBe(OWNERSHIP_CORPUS.length);
+  });
+
+  it("a PURELY-PUBLIC corpus is fully retrievable under a NON-NULL owner scope (the exact ingest->serve scenario)", async () => {
+    // Mirror the real bug: ingest ONLY unowned (null-owner) corpus docs, then
+    // retrieve under an authenticated (non-null) ownerId — as the grounded server
+    // does. Every public doc MUST be retrievable (OLD rule returned zero).
+    await ingestDocuments({
+      store,
+      embedder: makeOwnershipDocEmbedder(),
+      documents: [
+        { content: "public corpus knowledge about venues", sourceUri: "knowledge/corpus/public.md", ownerId: null },
+        { content: "owner A private note about budget", sourceUri: "knowledge/corpus/pub2.md", ownerId: null },
+      ],
+      chunking: { chunkSize: 1000, chunkOverlap: 0 },
+    });
+    const results = await retrieve({
+      store,
+      queryEmbedder: makeQueryEmbedder(0),
+      query: "anything grounded",
+      k: 5,
+      ownerId: "some-authenticated-user",
+    });
+    expect(results.length).toBe(2);
+    for (const r of results) {
+      expect(r.ownerId).toBeNull();
+    }
+    expect(results.map((r) => r.sourceUri)).toContain("knowledge/corpus/public.md");
   });
 });
 

@@ -171,15 +171,37 @@ describe("Phase 8 (8b) — authorization drops (unauthorized), defense-in-depth"
     expect(dropped).toEqual([{ marker: 2, reason: "unauthorized" }]);
   });
 
-  it("null-owner chunk UNDER A SCOPE is dropped as unauthorized (documented rule)", () => {
+  it("null-owner (PUBLIC) chunk UNDER A SCOPE is KEPT (Option 1 public-unowned rule)", () => {
+    // NEW rule (flipped from the OLD "null-owner under scope -> unauthorized"):
+    // a null-owner chunk is PUBLIC knowledge and is visible under ANY owner scope,
+    // exactly matching the retriever's public-unowned filter.
     const nullOwner = makeChunk({ chunkId: "chunk-null", ownerId: null });
     const { resolved, dropped } = resolveCitations({
       citations: [1],
       markerMap: makeMarkerMap([nullOwner]),
       ownerId: "owner-1",
     });
-    expect(resolved).toEqual([]);
-    expect(dropped).toEqual([{ marker: 1, reason: "unauthorized" }]);
+    expect(resolved.map((r) => r.chunkId)).toEqual(["chunk-null"]);
+    expect(dropped).toEqual([]);
+  });
+
+  it("SCOPED mix: PUBLIC (null) kept, owner-A kept, owner-B dropped as unauthorized", () => {
+    // The citation-side mirror of the retriever's public-unowned regression test:
+    // under owner-A, a public chunk + the requester's chunk resolve, and only a
+    // DIFFERENT non-null owner's chunk is dropped (owned-doc isolation preserved).
+    const pub = makeChunk({ chunkId: "chunk-public", ownerId: null });
+    const mine = makeChunk({ chunkId: "chunk-a", ownerId: "owner-A" });
+    const theirs = makeChunk({ chunkId: "chunk-b", ownerId: "owner-B" });
+    const markerMap = makeMarkerMap([pub, mine, theirs]);
+
+    const { resolved, dropped } = resolveCitations({
+      citations: [1, 2, 3],
+      markerMap,
+      ownerId: "owner-A",
+    });
+
+    expect(resolved.map((r) => r.chunkId)).toEqual(["chunk-public", "chunk-a"]);
+    expect(dropped).toEqual([{ marker: 3, reason: "unauthorized" }]);
   });
 
   it("NO scope (ownerId absent): ownership NOT enforced (matches retrieval scope)", () => {

@@ -67,9 +67,9 @@ export interface TrustedCitation {
 //     app never assigned it (out-of-range / hallucinated / a plausible-looking
 //     but invalid index). This is the crux of exit criterion 1 — a marker the
 //     app didn't assign is never honored.
-//   - "unauthorized": under an ownerId scope, the resolved chunk's app-owned
-//     ownerId does not match the requesting owner. Defense-in-depth atop the
-//     retriever's ownerId filter (see AUTHORIZATION below).
+//   - "unauthorized": under an ownerId scope, the resolved chunk is owned by a
+//     DIFFERENT, non-null owner (a null-owner PUBLIC chunk is kept). Defense-in-
+//     depth atop the retriever's ownerId filter (see AUTHORIZATION below).
 export type DroppedCitationReason = "unknown_marker" | "unauthorized";
 
 // A raw marker that was NOT emitted as a trusted citation, with the typed reason.
@@ -91,8 +91,9 @@ export interface ResolveCitationsArgs {
   // The APP-OWNED marker -> RetrievedChunk map produced by 8a (the ONLY source
   // of truth for which markers exist and what trusted metadata they carry).
   markerMap: Map<number, RetrievedChunk>;
-  // OPTIONAL owner scope. When provided, a resolved citation whose chunk.ownerId
-  // does NOT equal this value is DROPPED as "unauthorized" (see AUTHORIZATION).
+  // OPTIONAL owner scope. When provided, a resolved citation is DROPPED as
+  // "unauthorized" ONLY when its chunk.ownerId is a DIFFERENT, non-null owner; a
+  // null-owner (unowned/PUBLIC) chunk is KEPT under any scope (see AUTHORIZATION).
   // When null/absent, ownership is NOT enforced here (matches retrieval scope).
   ownerId?: string | null;
 }
@@ -115,17 +116,20 @@ export interface ResolveCitationsResult {
  *      with reason "unknown_marker". The app-owned markerMap is the SINGLE source
  *      of truth for which citations may exist; a marker the app didn't assign is
  *      NEVER honored.
- *   2. AUTHORIZATION DROP (defense-in-depth). If an `ownerId` scope is provided,
- *      DROP any resolved citation whose chunk.ownerId !== ownerId with reason
- *      "unauthorized". retrieve() already owner-scopes the candidate set, so a
- *      cross-owner chunk should not be in the markerMap at all; this guard is a
- *      SECOND, independent barrier so 8b can never emit a citation outside the
- *      caller's authorization even if retrieval scope were bypassed/changed.
- *        - NULL-OWNER CHUNK UNDER A SCOPE: a chunk with ownerId === null is NOT
- *          owned by the requesting owner, so under an ownerId scope it is DROPPED
- *          as "unauthorized". A null-owner (unowned/public) chunk is only kept
- *          when NO scope is requested (ownerId null/absent) — matching the
- *          retriever, which enforces ownership only when an ownerId is given.
+ *   2. AUTHORIZATION DROP (defense-in-depth), PUBLIC-UNOWNED rule. If an
+ *      `ownerId` scope is provided, DROP a resolved citation ONLY when its
+ *      chunk.ownerId is a DIFFERENT, non-null owner (chunk.ownerId != null &&
+ *      chunk.ownerId !== ownerId) with reason "unauthorized". retrieve() already
+ *      owner-scopes the candidate set with the SAME rule, so a cross-owner chunk
+ *      should not be in the markerMap at all; this guard is a SECOND, independent
+ *      barrier so 8b can never emit a citation outside the caller's authorization
+ *      even if retrieval scope were bypassed/changed.
+ *        - NULL-OWNER (UNOWNED/PUBLIC) CHUNK UNDER A SCOPE: a chunk with
+ *          ownerId === null is PUBLIC knowledge (e.g. the ingested corpus) and is
+ *          KEPT under ANY ownerId scope. ONLY a chunk owned by a DIFFERENT,
+ *          non-null owner is dropped as "unauthorized" — this preserves owned-doc
+ *          isolation while making unowned corpus visible under an owner scope,
+ *          exactly matching the retriever's public-unowned filter.
  *   3. DEDUPE. If the model cites the same marker more than once, it resolves to
  *      exactly ONE TrustedCitation. Dedupe is by marker. A repeated marker after
  *      its first (kept) occurrence is simply skipped — it is NOT re-emitted and
@@ -174,9 +178,12 @@ export function resolveCitations(
       continue;
     }
 
-    // (2) AUTHORIZATION DROP (defense-in-depth). Only enforced under a scope.
-    // A null-owner chunk is NOT owned by the requesting owner -> dropped.
-    if (ownerId != null && chunk.ownerId !== ownerId) {
+    // (2) AUTHORIZATION DROP (defense-in-depth), PUBLIC-UNOWNED rule. Only
+    // enforced under a scope, and aligned EXACTLY with the retriever's filter:
+    // a null-owner (unowned/PUBLIC) chunk is KEPT under any ownerId scope (public
+    // knowledge); ONLY a chunk owned by a DIFFERENT, non-null owner is dropped as
+    // "unauthorized", preserving owned-doc isolation.
+    if (ownerId != null && chunk.ownerId != null && chunk.ownerId !== ownerId) {
       dropped.push({ marker, reason: "unauthorized" });
       continue;
     }

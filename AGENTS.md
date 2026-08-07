@@ -35,6 +35,7 @@ npm run test:connection          # verify LiteLLM reachability — run first aft
 npm run test:capabilities        # probe the chat/embedding capability matrix -> docs/capabilities/<date>.md
 npm run test:contracts           # Phase 6 (6d) probe per-alias tool-call + structured-output contract -> docs/contracts/<date>.md
 npm run test:embedding           # Phase 7 (7d) verify the embedding alias + vector dimension through the proxy -> docs/embeddings/<date>.md
+npm run ingest                   # populate the DURABLE KNOWLEDGE_DB_PATH store from knowledge/corpus/*.md (idempotent source-addressed upsert); prerequisite for SERVICE_GROUNDED=1 grounded answers
 npm run eval                     # run the wedding-planning eval dataset -> docs/eval/<date>.md
 npm run eval:retrieval           # Phase 7 (7e) ingest the curated knowledge/ corpus + run the retrieval-only eval (recall@k/precision@k/MRR/nDCG@k) vs the PROPOSED baseline -> docs/retrieval/<date>.md
 npm run eval:rag                 # Phase 8 (8d) ingest the corpus + run the grounded-answer (RAG) eval (groundedness/citation P/R/injection-resistance/missing-evidence) vs the PROPOSED baseline -> docs/rag-eval/<date>.md

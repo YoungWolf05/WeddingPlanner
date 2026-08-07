@@ -186,9 +186,15 @@ export function distanceToScore(distance: number): number {
  *   - k LARGER than the corpus      -> returns ALL chunks (the store caps at the
  *                                      corpus size; result length may be < k).
  *
- * OWNER-SCOPED RETRIEVAL (authorization seam) + k-UNDERFILL CAVEAT:
- *   When `ownerId` is provided, results are restricted to chunks whose OWNING
- *   DOCUMENT has that ownerId. Because filtering happens AFTER the KNN (SQLite
+ * OWNER-SCOPED RETRIEVAL (authorization seam, PUBLIC-UNOWNED rule) + k-UNDERFILL
+ * CAVEAT:
+ *   When `ownerId` is provided, a chunk is VISIBLE iff its owning document is
+ *   EITHER UNOWNED (ownerId === null — a PUBLIC/unowned document such as the
+ *   ingested corpus, visible under ANY owner scope) OR owned by the requester
+ *   (ownerId === the scope). ONLY a chunk owned by a DIFFERENT, non-null owner is
+ *   dropped, so OWNED-DOC ISOLATION holds (a user can never see another non-null
+ *   owner's owned docs) while unowned corpus is public knowledge. When no ownerId
+ *   scope is given, nothing is filtered. Because filtering happens AFTER the KNN (SQLite
  *   vec0 has no owner column), a naive `MATCH ... k = k` then filter could
  *   UNDER-FILL k when other owners' chunks occupy the top-k. To make owner
  *   scoping correct WITHOUT changing the store schema, we fetch a LARGER
@@ -244,9 +250,24 @@ export async function retrieve(
     const document = store.getDocument(chunk.documentId);
     const resolvedOwnerId = document?.ownerId ?? null;
 
-    // Owner-scoped filter (authorization seam): drop chunks not owned by the
-    // requested owner. Applied post-KNN over the widened candidate window.
-    if (ownerId != null && resolvedOwnerId !== ownerId) continue;
+    // Owner-scoped filter (authorization seam), PUBLIC-UNOWNED rule. Applied
+    // post-KNN over the widened candidate window. When an ownerId scope is
+    // provided, a chunk is VISIBLE iff its owning document is EITHER:
+    //   - UNOWNED (resolvedOwnerId === null): a PUBLIC/unowned document (e.g. the
+    //     ingested corpus) is public knowledge, visible under ANY owner scope; OR
+    //   - OWNED BY THE REQUESTER (resolvedOwnerId === ownerId).
+    // We DROP ONLY a chunk owned by a DIFFERENT, non-null owner, so OWNED-DOC
+    // ISOLATION is preserved (a user can never see another non-null owner's owned
+    // docs) while unowned corpus becomes public. When NO ownerId scope is given
+    // (ownerId null/absent) nothing is filtered (unchanged). This mirrors the
+    // independent second barrier in citations.ts (resolveCitations) exactly.
+    if (
+      ownerId != null &&
+      resolvedOwnerId != null &&
+      resolvedOwnerId !== ownerId
+    ) {
+      continue;
+    }
 
     results.push({
       chunkId: chunk.chunkId,
